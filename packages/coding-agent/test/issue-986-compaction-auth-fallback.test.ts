@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
@@ -27,7 +28,11 @@ describe("issue #986 compaction auth fallback", () => {
 			await session.dispose();
 		}
 		authStorage?.close();
-		tempDir.removeSync();
+		try {
+			await fs.promises.rm(tempDir.path(), { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		} catch (error) {
+			if ((error as { code?: string }).code !== "EBUSY") throw error;
+		}
 	});
 
 	async function createSession(options?: { fallbackModelRole?: string; configureFallbackAuth?: boolean }) {

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
@@ -34,7 +35,11 @@ describe("compaction prefers the current session model over modelRoles.default",
 			await session.dispose();
 		}
 		authStorage?.close();
-		tempDir.removeSync();
+		try {
+			await fs.promises.rm(tempDir.path(), { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		} catch (error) {
+			if ((error as { code?: string }).code !== "EBUSY") throw error;
+		}
 	});
 
 	it("uses the active Anthropic chat model when modelRoles.default points at an OpenAI model", async () => {
@@ -96,5 +101,67 @@ describe("compaction prefers the current session model over modelRoles.default",
 		expect(compactSpy).toHaveBeenCalled();
 		const [, firstCandidate] = compactSpy.mock.calls[0]!;
 		expect(`${firstCandidate.provider}/${firstCandidate.id}`).toBe(`${currentModel.provider}/${currentModel.id}`);
+	});
+
+	it("uses compaction.model before the active chat model when configured", async () => {
+		const currentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const compactionModel = getBundledModel("openai", "gpt-5");
+		if (!currentModel || !compactionModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const compactionSelector = `${compactionModel.provider}/${compactionModel.id}`;
+		const settings = Settings.isolated({
+			"compaction.keepRecentTokens": 1,
+			"compaction.model": compactionSelector,
+		});
+
+		const agent = new Agent({
+			initialState: {
+				model: currentModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+		});
+
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.setRuntimeApiKey(currentModel.provider, "anthropic-token");
+		authStorage.setRuntimeApiKey(compactionModel.provider, "openai-token");
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.subscribe(() => {});
+
+		for (const [userText, assistantText] of [
+			["first question", "first answer"],
+			["second question", "second answer"],
+		] as const) {
+			const user = userMsg(userText);
+			const assistant = assistantMsg(assistantText);
+			session.agent.appendMessage(user);
+			session.sessionManager.appendMessage(user);
+			session.agent.appendMessage(assistant);
+			session.sessionManager.appendMessage(assistant);
+		}
+
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => ({
+			summary: "ok",
+			shortSummary: "ok short",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 1,
+			details: { provider: model.provider },
+		}));
+
+		await session.compact();
+
+		expect(compactSpy).toHaveBeenCalled();
+		const [, firstCandidate] = compactSpy.mock.calls[0]!;
+		expect(`${firstCandidate.provider}/${firstCandidate.id}`).toBe(compactionSelector);
 	});
 });

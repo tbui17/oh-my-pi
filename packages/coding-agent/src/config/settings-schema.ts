@@ -1526,6 +1526,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.model": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "context",
+			label: "Compaction Model",
+			description:
+				"Optional preferred model selector for compaction; accepts provider/model, canonical model IDs, or pi/<role> aliases",
+		},
+	},
+
 	"compaction.thresholdPercent": {
 		type: "number",
 		default: -1,
@@ -4177,6 +4188,7 @@ export type Personality = SettingValue<"personality">;
 export interface CompactionSettings {
 	enabled: boolean;
 	strategy: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	model: string | undefined;
 	thresholdPercent: number;
 	thresholdTokens: number;
 	reserveTokens: number;

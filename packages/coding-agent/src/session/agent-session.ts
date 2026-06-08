@@ -507,6 +507,11 @@ export interface RoleModelCycle {
 	currentIndex: number;
 }
 
+interface CompactionModelCandidate {
+	model: Model;
+	thinkingLevel?: ThinkingLevel;
+}
+
 /** Session statistics for /session command */
 export interface SessionStats {
 	sessionFile: string | undefined;
@@ -7549,24 +7554,42 @@ export class AgentSession {
 		});
 	}
 
-	#getCompactionModelCandidates(availableModels: Model[]): Model[] {
-		const candidates: Model[] = [];
+	#getCompactionModelCandidates(availableModels: Model[]): CompactionModelCandidate[] {
+		const candidates: CompactionModelCandidate[] = [];
 		const seen = new Set<string>();
 
-		const addCandidate = (model: Model | undefined): void => {
+		const addCandidate = (model: Model | undefined, thinkingLevel?: ThinkingLevel): void => {
 			if (!model) return;
 			const key = this.#getModelKey(model);
 			if (seen.has(key)) return;
 			seen.add(key);
-			candidates.push(model);
+			candidates.push({ model, thinkingLevel });
 		};
 
 		const currentModel = this.model;
-		// Prefer the active session's model: it's what the user is actively using,
-		// and routing compaction to a different provider (e.g. an OpenAI default
-		// model while the chat is on Anthropic) changes provider-specific behavior
-		// like remote compaction endpoints. Role-based candidates only kick in
-		// as auth fallbacks when the current model has no usable credentials.
+		const configuredModel = this.settings.get("compaction.model")?.trim();
+		if (configuredModel) {
+			const resolved = resolveModelRoleValue(configuredModel, availableModels, {
+				settings: this.settings,
+				matchPreferences: getModelMatchPreferences(this.settings),
+				modelRegistry: this.#modelRegistry,
+			});
+			if (resolved.model) {
+				addCandidate(resolved.model, resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined);
+			} else {
+				logger.warn("Configured compaction model could not be resolved", {
+					model: configuredModel,
+					warning: resolved.warning,
+				});
+			}
+		}
+
+		// By default, prefer the active session's model: it's what the user is
+		// actively using, and routing compaction to a different provider (e.g.
+		// an OpenAI default model while the chat is on Anthropic) changes
+		// provider-specific behavior like remote compaction endpoints. Role-based
+		// candidates only kick in as auth fallbacks when the current model has no
+		// usable credentials.
 		addCandidate(currentModel);
 		for (const role of MODEL_ROLE_IDS) {
 			addCandidate(this.#resolveRoleModelFull(role, availableModels, currentModel).model);
@@ -7618,26 +7641,26 @@ export class AgentSession {
 		const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 
 		for (const candidate of candidates) {
-			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+			const model = candidate.model;
+			const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 			if (!apiKey) continue;
 
 			try {
 				return await compact(
 					this.#obfuscatePreparationForProvider(preparation),
-					candidate,
-					this.#modelRegistry.resolver(candidate, this.sessionId),
+					model,
+					apiKey,
 					this.#obfuscateTextForProvider(customInstructions),
 					signal,
 					{
 						...options,
-						metadata: this.agent.metadataForProvider(candidate.provider),
+						metadata: this.agent.metadataForProvider(model.provider),
 						convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 						telemetry,
 						// Honor the user's /model thinking selection (incl. `off`) on
-						// the manual `/compact` path. Clamped per-model inside compact()
-						// via resolveCompactionEffort so unsupported-effort models
-						// (xai-oauth/grok-build) don't trip requireSupportedEffort.
-						thinkingLevel: this.thinkingLevel,
+						// the manual `/compact` path unless compaction.model includes an
+						// explicit thinking selector. Clamped per-model inside compact().
+						thinkingLevel: candidate.thinkingLevel ?? this.thinkingLevel,
 					},
 				);
 			} catch (error) {
@@ -7949,7 +7972,8 @@ export class AgentSession {
 				let lastError: unknown;
 
 				for (const candidate of candidates) {
-					const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+					const model = candidate.model;
+					const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 					if (!apiKey) continue;
 
 					let attempt = 0;
@@ -7957,23 +7981,22 @@ export class AgentSession {
 						try {
 							compactResult = await compact(
 								this.#obfuscatePreparationForProvider(preparation),
-								candidate,
-								this.#modelRegistry.resolver(candidate, this.sessionId),
+								model,
+								apiKey,
 								undefined,
 								autoCompactionSignal,
 								{
 									promptOverride: this.#obfuscateTextForProvider(compactionPrep.hookPrompt),
 									extraContext: this.#obfuscateForProvider(compactionPrep.hookContext),
 									remoteInstructions: this.#obfuscateForProvider(this.#baseSystemPrompt.join("\n\n")),
-									metadata: this.agent.metadataForProvider(candidate.provider),
+									metadata: this.agent.metadataForProvider(model.provider),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 									telemetry,
 									// Honor the user's /model thinking selection on the
-									// auto-compaction path — the most-fired compaction
-									// site. Clamped per-model inside compact() via
-									// resolveCompactionEffort.
-									thinkingLevel: this.thinkingLevel,
+									// auto-compaction path unless compaction.model includes
+									// an explicit thinking selector. Clamped per-model inside compact().
+									thinkingLevel: candidate.thinkingLevel ?? this.thinkingLevel,
 								},
 							);
 							break;
@@ -8011,7 +8034,7 @@ export class AgentSession {
 										delayMs,
 										retryAfterMs,
 										error: message,
-										model: `${candidate.provider}/${candidate.id}`,
+										model: `${candidate.model.provider}/${candidate.model.id}`,
 									});
 									lastError = error;
 									break; // Exit retry loop, continue to next candidate
@@ -8026,7 +8049,7 @@ export class AgentSession {
 								delayMs,
 								retryAfterMs,
 								error: message,
-								model: `${candidate.provider}/${candidate.id}`,
+								model: `${candidate.model.provider}/${candidate.model.id}`,
 							});
 							await scheduler.wait(delayMs, { signal: autoCompactionSignal });
 						}

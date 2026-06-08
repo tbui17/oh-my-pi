@@ -235,6 +235,13 @@ Prompt selection:
 - short UI summary: `compaction-short-summary.md`
 - handoff document: `handoff-document.md` (used by `generateHandoff(...)`, not serialized compaction)
 
+Model selection:
+
+- If `compaction.model` is set, it is tried first.
+- Otherwise compaction tries the active session model first.
+- If the preferred/current model has no usable credentials, role models are tried as authenticated fallbacks.
+- A largest-context available model remains the final fallback candidate.
+
 Remote summarization modes:
 
 - If `compaction.remoteEndpoint` is set and remote compaction is enabled, local summary generation POSTs:
@@ -404,6 +411,7 @@ From `settings-schema.ts`:
 
 - `compaction.enabled` = `true`
 - `compaction.strategy` = `"context-full"` (`"handoff"`, `"shake"`, `"snapcompact"`, and `"off"` are also supported)
+- `compaction.model` = `undefined`; when set, it is the preferred compaction model selector and accepts `provider/model`, canonical IDs, or `pi/<role>` aliases
 - `compaction.reserveTokens` = `16384`
 - `compaction.keepRecentTokens` = `20000`
 - `compaction.autoContinue` = `true`
