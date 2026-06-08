@@ -197,6 +197,8 @@ export interface AutocompleteProvider {
 
 	/** Get inline hint text to show as dim ghost text after the cursor */
 	getInlineHint?(lines: string[], cursorLine: number, cursorCol: number): string | null;
+	/** Provider-specific natural trigger hook for typed characters/tokens. */
+	shouldTriggerAutocomplete?(textBeforeCursor: string, char: string): boolean;
 	/** Synchronously try to complete a slash command at the start of a line (no async I/O). */
 	/** Returns matched items and the full prefix, or null if not applicable. */
 	trySyncSlashCompletion?(textBeforeCursor: string): { items: AutocompleteItem[]; prefix: string } | null;

@@ -1190,22 +1190,12 @@ export class Editor implements Component, Focusable {
 		else if (matchesKey(data, "ctrl+u")) {
 			this.#deleteToStartOfLine();
 		}
-		// Ctrl+W - Delete word backwards
-		else if (matchesKey(data, "ctrl+w")) {
+		// Delete word backwards
+		else if (kb.matches(data, "tui.editor.deleteWordBackward")) {
 			this.#deleteWordBackwards();
 		}
-		// Option/Alt+Backspace - Delete word backwards.
-		// Ghostty on macOS reports Option+Backspace as super+alt (kitty mod 11) — see #2064.
-		else if (matchesKey(data, "alt+backspace") || matchesKey(data, "super+alt+backspace")) {
-			this.#deleteWordBackwards();
-		}
-		// Option/Alt+D and Option+Delete - Delete word forwards. Same Ghostty quirk applies.
-		else if (
-			matchesKey(data, "alt+d") ||
-			matchesKey(data, "alt+delete") ||
-			matchesKey(data, "super+alt+d") ||
-			matchesKey(data, "super+alt+delete")
-		) {
+		// Delete word forwards
+		else if (kb.matches(data, "tui.editor.deleteWordForward")) {
 			this.#deleteWordForwards();
 		}
 		// Ctrl+Y - Yank from kill ring
@@ -1665,14 +1655,17 @@ export class Editor implements Component, Focusable {
 
 		// Check if we should trigger or update autocomplete
 		if (!this.#autocompleteState) {
+			const currentLine = this.#state.lines[this.#state.cursorLine] || "";
+			const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
+			if (this.#providerTriggersAutocomplete(textBeforeCursor, char)) {
+				this.#tryTriggerAutocomplete();
+			}
 			// Auto-trigger for "/" at the start of a line (slash commands)
-			if (char === "/" && this.#isAtStartOfSubmittedMessage()) {
+			else if (char === "/" && this.#isAtStartOfSubmittedMessage()) {
 				this.#tryTriggerAutocomplete();
 			}
 			// Auto-trigger for "@" file reference (fuzzy search)
 			else if (char === "@") {
-				const currentLine = this.#state.lines[this.#state.cursorLine] || "";
-				const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 				// Only trigger if @ is after whitespace or at start of line
 				const charBeforeAt = textBeforeCursor[textBeforeCursor.length - 2];
 				if (textBeforeCursor.length === 1 || charBeforeAt === " " || charBeforeAt === "\t") {
@@ -1685,8 +1678,6 @@ export class Editor implements Component, Focusable {
 			}
 			// Also auto-trigger when typing letters/path chars in a completable context
 			else if (/[a-zA-Z0-9.\-_/]/.test(char)) {
-				const currentLine = this.#state.lines[this.#state.cursorLine] || "";
-				const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 				// Check if we're in a slash command (with or without space for arguments)
 				if (this.#isInSubmittedSlashCommandContext()) {
 					this.#tryTriggerAutocomplete();
@@ -2748,6 +2739,10 @@ export class Editor implements Component, Focusable {
 	#textTriggersUrlAutocomplete(textBeforeCursor: string): boolean {
 		return /(?:^|[\s"'`(<=])[a-z][a-z0-9+.-]*:\/{1,2}[^\s"'`()<>]*$/i.test(textBeforeCursor);
 	}
+	#providerTriggersAutocomplete(textBeforeCursor: string, char: string): boolean {
+		return this.#autocompleteProvider?.shouldTriggerAutocomplete?.(textBeforeCursor, char) ?? false;
+	}
+
 
 	async #tryTriggerAutocomplete(explicitTab: boolean = false): Promise<void> {
 		if (!this.#autocompleteProvider) return;

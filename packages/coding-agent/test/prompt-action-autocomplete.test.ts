@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { KeybindingsManager as AppKeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/modes/prompt-action-autocomplete";
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui";
@@ -109,6 +112,83 @@ describe("prompt action autocomplete", () => {
 
 		const suggestions = await provider.getSuggestions(["release #v1"], 0, 11);
 		expect(suggestions).toBeNull();
+	});
+
+	it("shows discovered agents for dollar-prefixed autocomplete", async () => {
+		const basePath = fs.mkdtempSync(path.join(os.tmpdir(), "agent-autocomplete-"));
+		try {
+			const agentsDir = path.join(basePath, ".omp", "agents");
+			fs.mkdirSync(agentsDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(agentsDir, "screening.md"),
+				"---\nname: screening-agent\ndescription: Evaluates candidate screening material\n---\nYou screen candidates.\n",
+			);
+			const provider = createPromptActionAutocompleteProvider({
+				commands: [],
+				basePath,
+				keybindings: AppKeybindingsManager.inMemory(),
+				copyCurrentLine: () => {},
+				copyPrompt: () => {},
+				undo: () => {},
+				moveCursorToMessageEnd: () => {},
+				moveCursorToMessageStart: () => {},
+				moveCursorToLineStart: () => {},
+				moveCursorToLineEnd: () => {},
+			});
+
+			const suggestions = await provider.getSuggestions(["Use $screen"], 0, 11);
+			expect(suggestions).not.toBeNull();
+			expect(suggestions?.prefix).toBe("$screen");
+			expect(suggestions?.items.map(item => item.value)).toContain("screening-agent");
+		} finally {
+			fs.rmSync(basePath, { force: true, recursive: true });
+		}
+	});
+	it("triggers dollar autocomplete as a mid-sentence token", () => {
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/tmp",
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		expect(provider.shouldTriggerAutocomplete("Ask $", "$")).toBe(true);
+		expect(provider.shouldTriggerAutocomplete("Ask $rev", "v")).toBe(true);
+		expect(provider.shouldTriggerAutocomplete("Ask ($rev", "v")).toBe(true);
+		expect(provider.shouldTriggerAutocomplete("cost$", "$")).toBe(false);
+	});
+
+
+	it("replaces the dollar prefix with the selected agent name", async () => {
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/tmp",
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		const result = provider.applyCompletion(
+			["Ask $screen for review"],
+			0,
+			11,
+			{ value: "screening-agent", label: "screening-agent" },
+			"$screen",
+		);
+
+		expect(result.lines).toEqual(["Ask screening-agent for review"]);
+		expect(result.cursorCol).toBe("Ask screening-agent ".length);
 	});
 
 	it("delegates trySyncSlashCompletion to CombinedAutocompleteProvider", () => {

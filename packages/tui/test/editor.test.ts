@@ -618,15 +618,15 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b\x7f"); // Alt+Backspace (legacy)
 			expect(editor.getText()).toBe("foo ");
 
-			// Issue #2064: Ghostty on macOS reports Option+Backspace as `ESC [127;11u`
-			// (kitty modifier 11 wire = super(8)|alt(2)). Without super support the
-			// editor used to ignore this entirely and the previous word survived.
+			// Ctrl+Backspace
 			setKittyProtocolActive(true);
-			editor.setText("foo bar");
-			editor.handleInput("\x1b[F"); // End — park cursor at EOL
-			editor.handleInput("\x1b[127;11u"); // Ghostty Option+Backspace
-			expect(editor.getText()).toBe("foo ");
-			setKittyProtocolActive(false);
+			try {
+				editor.setText("foo bar");
+				editor.handleInput("\x1b[127;5u");
+				expect(editor.getText()).toBe("foo ");
+			} finally {
+				setKittyProtocolActive(false);
+			}
 		});
 
 		it("navigates words correctly with Ctrl+Left/Right", () => {

@@ -13,6 +13,8 @@ import {
 	getInternalUrlSuggestions,
 	isInternalUrlPrefix,
 } from "./internal-url-autocomplete";
+import { discoverAgents } from "../task/discovery";
+
 
 interface PromptActionDefinition {
 	id: string;
@@ -81,6 +83,43 @@ function isPromptActionItem(item: AutocompleteItem): item is PromptActionAutocom
 	return "actionId" in item && "execute" in item && typeof item.execute === "function";
 }
 
+function isAgentPrefixBoundary(char: string | undefined): boolean {
+	return char === undefined || /\s/.test(char) || "\"'`([{<".includes(char);
+}
+
+function getAgentPrefix(textBeforeCursor: string): string | null {
+	const dollarIndex = textBeforeCursor.lastIndexOf("$");
+	if (dollarIndex === -1) return null;
+	if (!isAgentPrefixBoundary(textBeforeCursor[dollarIndex - 1])) return null;
+
+	const query = textBeforeCursor.slice(dollarIndex + 1);
+	if (/[\s]/.test(query)) {
+		return null;
+	}
+
+	return textBeforeCursor.slice(dollarIndex);
+}
+
+async function getAgentSuggestions(cwd: string, prefix: string): Promise<AutocompleteItem[]> {
+	const query = prefix.slice(1).toLowerCase();
+	const { agents } = await discoverAgents(cwd);
+	return agents
+		.map(agent => {
+			const searchable = `${agent.name} ${agent.description} ${agent.source}`.toLowerCase();
+			if (!fuzzyMatch(query, searchable)) return null;
+			return {
+				value: agent.name,
+				label: agent.name,
+				description: `${agent.description} [${agent.source}]`,
+				score: fuzzyScore(query, searchable),
+			};
+		})
+		.filter(item => item !== null)
+		.sort((a, b) => b.score - a.score)
+		.map(({ score: _score, ...item }) => item);
+}
+
+
 function getPromptActionPrefix(textBeforeCursor: string): string | null {
 	const hashIndex = textBeforeCursor.lastIndexOf("#");
 	if (hashIndex === -1) return null;
@@ -95,10 +134,12 @@ function getPromptActionPrefix(textBeforeCursor: string): string | null {
 
 export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	#baseProvider: CombinedAutocompleteProvider;
+	#basePath: string;
 	#actions: PromptActionDefinition[];
 
 	constructor(commands: SlashCommand[], basePath: string, actions: PromptActionDefinition[]) {
 		this.#baseProvider = new CombinedAutocompleteProvider(commands, basePath);
+		this.#basePath = basePath;
 		this.#actions = actions;
 	}
 
@@ -110,6 +151,12 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
 		const promptActionPrefix = getPromptActionPrefix(textBeforeCursor);
+		const agentPrefix = getAgentPrefix(textBeforeCursor);
+		if (agentPrefix) {
+			const items = await getAgentSuggestions(this.#basePath, agentPrefix);
+			if (items.length > 0) return { items, prefix: agentPrefix };
+		}
+
 		if (promptActionPrefix) {
 			const query = promptActionPrefix.slice(1).toLowerCase();
 			const items = this.#actions
@@ -182,6 +229,21 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			return applyInternalUrlCompletion(lines, cursorLine, cursorCol, item, prefix);
 		}
 
+		if (prefix.startsWith("$")) {
+			const currentLine = lines[cursorLine] || "";
+			const beforePrefix = currentLine.slice(0, cursorCol - prefix.length);
+			const afterCursor = currentLine.slice(cursorCol);
+			const existingSeparator = afterCursor.startsWith(" ");
+			const separator = existingSeparator ? "" : " ";
+			const newLines = [...lines];
+			newLines[cursorLine] = beforePrefix + item.value + separator + afterCursor;
+			return {
+				lines: newLines,
+				cursorLine,
+				cursorCol: beforePrefix.length + item.value.length + (existingSeparator ? 1 : separator.length),
+			};
+		}
+
 		if (isEmojiPrefix(prefix)) {
 			return applyEmojiCompletion(lines, cursorLine, cursorCol, item, prefix);
 		}
@@ -194,6 +256,12 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	trySyncSlashCompletion(textBeforeCursor: string): { items: AutocompleteItem[]; prefix: string } | null {
 		return this.#baseProvider.trySyncSlashCompletion?.(textBeforeCursor) ?? null;
 	}
+	shouldTriggerAutocomplete(textBeforeCursor: string, char: string): boolean {
+		if (char === "$") return getAgentPrefix(textBeforeCursor) !== null;
+		if (!/[a-zA-Z0-9_-]/.test(char)) return false;
+		return getAgentPrefix(textBeforeCursor) !== null;
+	}
+
 	trySyncInlineReplace(textBeforeCursor: string): { replaceLen: number; insert: string } | null {
 		if (isSettingsInitialized() && !settings.get("emojiAutocomplete")) return null;
 		return tryEmojiInlineReplace(textBeforeCursor);
