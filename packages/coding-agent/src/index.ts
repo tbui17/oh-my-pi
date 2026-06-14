@@ -5,7 +5,38 @@ import { HookEditorComponent, HookInputComponent, HookSelectorComponent } from "
 // Re-export TUI components for custom tool rendering
 export { Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 // Logging
-export { getAgentDir, logger, VERSION } from "@oh-my-pi/pi-utils";
+export { getAgentDir, logger, parseFrontmatter, VERSION } from "@oh-my-pi/pi-utils";
+export function defineTool<T>(tool: T): T {
+	return tool;
+}
+
+export interface DefaultResourceLoaderOptions {
+	systemPrompt?: string;
+	appendSystemPrompt?: string[];
+	systemPromptOverride?: (base: string | undefined) => string | undefined;
+	appendSystemPromptOverride?: (base: string[]) => string[];
+}
+
+export class DefaultResourceLoader {
+	constructor(private readonly options: DefaultResourceLoaderOptions = {}) {}
+
+	async reload(): Promise<void> {}
+
+	getSystemPrompt(): string | undefined {
+		return this.options.systemPromptOverride?.(this.options.systemPrompt) ?? this.options.systemPrompt;
+	}
+
+	getAppendSystemPrompt(): string[] {
+		const base = this.options.appendSystemPrompt ?? [];
+		return this.options.appendSystemPromptOverride?.(base) ?? base;
+	}
+}
+
+export class SettingsManager {
+	static create(_cwd: string, _agentDir?: string): SettingsManager {
+		return new SettingsManager();
+	}
+}
 export * from "./config/keybindings";
 export * from "./config/model-registry";
 // Prompt templates
