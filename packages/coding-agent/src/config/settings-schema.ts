@@ -1531,6 +1531,7 @@ export const SETTINGS_SCHEMA = {
 		default: undefined,
 		ui: {
 			tab: "context",
+			group: "Compaction",
 			label: "Compaction Model",
 			description:
 				"Optional preferred model selector for compaction; accepts provider/model, canonical model IDs, or pi/<role> aliases",

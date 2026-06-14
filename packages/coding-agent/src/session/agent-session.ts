@@ -7649,7 +7649,7 @@ export class AgentSession {
 				return await compact(
 					this.#obfuscatePreparationForProvider(preparation),
 					model,
-					apiKey,
+					this.#modelRegistry.resolver(model, this.sessionId),
 					this.#obfuscateTextForProvider(customInstructions),
 					signal,
 					{
@@ -7982,7 +7982,7 @@ export class AgentSession {
 							compactResult = await compact(
 								this.#obfuscatePreparationForProvider(preparation),
 								model,
-								apiKey,
+								this.#modelRegistry.resolver(model, this.sessionId),
 								undefined,
 								autoCompactionSignal,
 								{
