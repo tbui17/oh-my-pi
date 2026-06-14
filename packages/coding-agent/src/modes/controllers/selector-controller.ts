@@ -259,7 +259,7 @@ export class SelectorController {
 
 	/**
 	 * Handle setting changes from the settings selector.
-	 * Most settings are saved directly via SettingsManager in the definitions.
+	 * Most settings are saved directly via Settings definitions.
 	 * This handles side effects and session-specific settings.
 	 */
 	handleSettingChange(id: string, value: unknown): void {
@@ -275,7 +275,7 @@ export class SelectorController {
 		}
 
 		switch (id) {
-			// Session-managed settings (not in SettingsManager)
+			// Session-managed settings (not in Settings definitions)
 			case "autoCompact":
 				this.ctx.session.setAutoCompactionEnabled(value as boolean);
 				this.ctx.statusLine.setAutoCompactEnabled(value as boolean);
@@ -430,7 +430,7 @@ export class SelectorController {
 				this.ctx.mcpManager?.setNotificationsEnabled(value as boolean);
 				break;
 
-			// All other settings are handled by the definitions (get/set on SettingsManager)
+			// All other settings are handled by the settings definitions.
 			// No additional side effects needed
 		}
 	}

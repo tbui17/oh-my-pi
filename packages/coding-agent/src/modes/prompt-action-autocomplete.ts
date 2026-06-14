@@ -7,14 +7,13 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { formatKeyHints, type KeybindingsManager } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
+import { discoverAgents } from "../task/discovery";
 import { applyEmojiCompletion, getEmojiSuggestions, isEmojiPrefix, tryEmojiInlineReplace } from "./emoji-autocomplete";
 import {
 	applyInternalUrlCompletion,
 	getInternalUrlSuggestions,
 	isInternalUrlPrefix,
 } from "./internal-url-autocomplete";
-import { discoverAgents } from "../task/discovery";
-
 
 interface PromptActionDefinition {
 	id: string;
@@ -118,7 +117,6 @@ async function getAgentSuggestions(cwd: string, prefix: string): Promise<Autocom
 		.sort((a, b) => b.score - a.score)
 		.map(({ score: _score, ...item }) => item);
 }
-
 
 function getPromptActionPrefix(textBeforeCursor: string): string | null {
 	const hashIndex = textBeforeCursor.lastIndexOf("#");

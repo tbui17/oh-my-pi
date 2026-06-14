@@ -164,7 +164,6 @@ describe("prompt action autocomplete", () => {
 		expect(provider.shouldTriggerAutocomplete("cost$", "$")).toBe(false);
 	});
 
-
 	it("replaces the dollar prefix with the selected agent name", async () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [],

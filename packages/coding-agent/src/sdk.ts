@@ -1070,36 +1070,13 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
  *   model: myModel,
  *   getApiKey: async () => Bun.env.MY_KEY,
  *   systemPrompt: ['You are helpful.'],
- *   tools: codingTools({ cwd: getProjectDir() }),
+ *   toolNames: ['read', 'edit', 'bash'],
  *   skills: [],
  *   sessionManager: SessionManager.inMemory(),
  * });
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	const legacyOptions = options as CreateAgentSessionOptions & {
-		tools?: string[];
-		resourceLoader?: {
-			getSystemPrompt?: () => string | undefined;
-			getAppendSystemPrompt?: () => string[];
-		};
-	};
-	const legacySystemPrompt = legacyOptions.resourceLoader?.getSystemPrompt?.();
-	const legacyAppendPrompt = legacyOptions.resourceLoader?.getAppendSystemPrompt?.() ?? [];
-	if (
-		legacyOptions.tools !== undefined ||
-		legacySystemPrompt !== undefined ||
-		legacyAppendPrompt.length > 0
-	) {
-		options = {
-			...options,
-			toolNames: options.toolNames ?? legacyOptions.tools,
-			systemPrompt: options.systemPrompt ?? [
-				...(legacySystemPrompt !== undefined ? [legacySystemPrompt] : []),
-				...legacyAppendPrompt,
-			],
-		};
-	}
 	const cwd = options.cwd ?? getProjectDir();
 	const agentDir = options.agentDir ?? getDefaultAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();

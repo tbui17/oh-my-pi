@@ -183,7 +183,7 @@ describe("Settings", () => {
 		});
 	});
 
-	// Tests that SettingsManager merges with DB state on save rather than blindly overwriting.
+	// Tests that Settings merges with DB state on save rather than blindly overwriting.
 	// This ensures external edits (via AgentStorage directly) aren't lost when the app saves.
 	describe("preserves externally added settings", () => {
 		it("should preserve enabledModels when changing thinking level", async () => {

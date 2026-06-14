@@ -795,6 +795,10 @@
 - Removed the animated pending border ("shimmer") on running `bash`, `eval`, and `ssh` execution blocks. While pending, a block now shows a static accent border instead of sweeping a dark segment around its bottom edge; `display.shimmer` still governs the working-status line and `task` row animations.
 - Removed the tool-level `nonAbortable` bypass so `write` and `edit` honor the active turn `AbortSignal`. `read` is abortable for everything that is slow or non-deterministic (URL/internal-URL reads, archive, sqlite, document conversion, image decode, structural summary, conflict scan, suffix glob); only the deterministic plain-file line/range reads and directory listings run to completion.
 
+### Added
+
+- Added `parseFrontmatter` as a root export from `@oh-my-pi/pi-coding-agent` for extension and SDK authors.
+
 ## [15.10.2] - 2026-06-08
 
 ### Added
