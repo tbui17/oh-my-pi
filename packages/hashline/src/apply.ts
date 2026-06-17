@@ -130,6 +130,102 @@ function bucketAnchorEditsByLine(edits: IndexedEdit[]): Map<number, IndexedEdit[
 /** A line that is nothing but closing delimiters: `}`, `)`, `];`, `})`, `},`. */
 export const STRUCTURAL_CLOSER_RE = /^\s*[)\]}]+[;,]?\s*$/;
 
+/** A JSX/XML closing boundary that carries structure but no bracket tokens. */
+const JSX_CLOSER_RE = /^\s*(?:<\/>|<\/[A-Za-z][\w.:-]*>|\/>)\s*[;,]?\s*$/;
+const JSX_NAMED_CLOSER_RE = /^\s*<\/([A-Za-z][\w.:-]*)>\s*[;,]?\s*$/;
+const JSX_FRAGMENT_CLOSER_RE = /^\s*<\/>\s*[;,]?\s*$/;
+
+function isStructuralCloserLine(text: string): boolean {
+	return STRUCTURAL_CLOSER_RE.test(text) || JSX_CLOSER_RE.test(text);
+}
+
+function jsxCloserName(text: string): string | undefined {
+	if (JSX_FRAGMENT_CLOSER_RE.test(text)) return "";
+	const match = JSX_NAMED_CLOSER_RE.exec(text);
+	return match?.[1];
+}
+
+interface JsxPayloadTag {
+	readonly name: string;
+	readonly closing: boolean;
+	readonly selfClosing: boolean;
+}
+
+function isJsxTagStart(text: string, index: number): boolean {
+	const next = text[index + 1];
+	return next === ">" || next === "/" || (next >= "A" && next <= "Z") || (next >= "a" && next <= "z");
+}
+
+function findJsxTagEnd(text: string, start: number): number {
+	let quote: string | undefined;
+	let braces = 0;
+	for (let i = start + 1; i < text.length; i++) {
+		const ch = text[i];
+		if (quote) {
+			if (ch === "\\" && i + 1 < text.length) {
+				i++;
+			} else if (ch === quote) {
+				quote = undefined;
+			}
+			continue;
+		}
+		if (ch === '"' || ch === "'" || ch === "`") {
+			quote = ch;
+		} else if (ch === "{") {
+			braces++;
+		} else if (ch === "}" && braces > 0) {
+			braces--;
+		} else if (ch === ">" && braces === 0) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+function parseJsxPayloadTag(raw: string): JsxPayloadTag | undefined {
+	if (raw === "<>") return { name: "", closing: false, selfClosing: false };
+	if (raw === "</>") return { name: "", closing: true, selfClosing: false };
+	const closing = raw.startsWith("</");
+	const nameStart = closing ? 2 : 1;
+	let nameEnd = nameStart;
+	while (nameEnd < raw.length && /[\w.:-]/.test(raw[nameEnd])) nameEnd++;
+	if (nameEnd === nameStart) return undefined;
+	return {
+		name: raw.slice(nameStart, nameEnd),
+		closing,
+		selfClosing: !closing && /\/>\s*$/.test(raw),
+	};
+}
+
+function readJsxPayloadTags(text: string): JsxPayloadTag[] {
+	const tags: JsxPayloadTag[] = [];
+	for (let start = text.indexOf("<"); start >= 0; start = text.indexOf("<", start + 1)) {
+		if (!isJsxTagStart(text, start)) continue;
+		const end = findJsxTagEnd(text, start);
+		if (end < 0) break;
+		const tag = parseJsxPayloadTag(text.slice(start, end + 1));
+		if (tag) tags.push(tag);
+		start = end;
+	}
+	return tags;
+}
+
+function payloadHasJsxOpenerForEcho(payloadPrefix: readonly string[], echoLines: readonly string[]): boolean {
+	const openTags: string[] = [];
+	for (const tag of readJsxPayloadTags(payloadPrefix.join("\n"))) {
+		if (tag.closing) {
+			if (openTags[openTags.length - 1] === tag.name) openTags.pop();
+		} else if (!tag.selfClosing) {
+			openTags.push(tag.name);
+		}
+	}
+	for (const line of echoLines) {
+		const name = jsxCloserName(line);
+		if (name !== undefined && openTags.includes(name)) return true;
+	}
+	return false;
+}
+
 interface DelimiterBalance {
 	paren: number;
 	bracket: number;
@@ -232,7 +328,7 @@ interface ReplacementGroup {
  * Detect a replacement group starting at `start`: a run of `before_anchor`
  * replacement inserts sharing one source op line, immediately followed by the
  * contiguous range deletes for that same op. Mirrors how the parser lowers an
- * `replace N..M:` hunk with a body.
+ * `replace N.=M:` hunk with a body.
  */
 function findReplacementGroup(edits: readonly AppliedEdit[], start: number): ReplacementGroup | undefined {
 	const first = edits[start];
@@ -444,6 +540,54 @@ function describeBoundaryRepair(group: ReplacementGroup, action: string): string
 }
 
 /**
+ * A single-sided boundary echo in an otherwise delimiter-balanced *multi-line*
+ * replacement: the payload's leading XOR trailing edge exactly restates the
+ * surviving line(s) just outside the range — the off-by-one "range one line
+ * short of the keeper I retyped" mistake (e.g. att: payload ends with
+ * `const x = [];` and line B+1 is the same `const x = [];`). Two-sided echoes
+ * are handled by {@link findBoundaryEcho}; delimiter-imbalanced one-sided echoes
+ * by {@link findDuplicateSuffix}/{@link findDuplicatePrefix}.
+ *
+ * Scoped broadly for multi-line ranges (a construct rewrite) because retouched
+ * neutral keepers are usually boundary mistakes there. Single-line expansions
+ * are riskier — ordinary duplicated statements may be intentional — so they are
+ * only repaired when the duplicated edge is a structural closer line that
+ * carries no delimiter-balance signal itself, such as a JSX `</section>` close.
+ * The dropped lines must keep the already-balanced result balanced, and must
+ * not consume the whole payload.
+ */
+function findOneSidedBoundaryEcho(
+	group: ReplacementGroup,
+	fileLines: readonly string[],
+): { side: "leading" | "trailing"; count: number } | undefined {
+	const leading = countDuplicateLeadingBoundaryLines(group, fileLines);
+	const trailing = countDuplicateTrailingBoundaryLines(group, fileLines);
+	if (leading > 0 === trailing > 0) return undefined;
+	const side = leading > 0 ? "leading" : "trailing";
+	const count = leading > 0 ? leading : trailing;
+	if (count >= group.payload.length) return undefined;
+	const echoLines =
+		side === "leading" ? group.payload.slice(0, count) : group.payload.slice(group.payload.length - count);
+	if (!balanceIsZero(computeDelimiterBalance(echoLines))) return undefined;
+	if (group.deleteIndices.length <= 1) {
+		if (side !== "trailing" || !echoLines.every(isStructuralCloserLine)) return undefined;
+		const payloadPrefix = group.payload.slice(0, group.payload.length - count);
+		if (payloadHasJsxOpenerForEcho(payloadPrefix, echoLines)) return undefined;
+	}
+	return { side, count };
+}
+
+function describeOneSidedEchoRepair(group: ReplacementGroup, side: "leading" | "trailing", count: number): string {
+	const where = side === "leading" ? "above" : "below";
+	return (
+		`Auto-repaired a replacement boundary echo at line ${group.startLine}: ` +
+		`dropped ${count} ${side} payload line(s) identical to the surviving line(s) just ${where} the range. ` +
+		`The range was one line short of the content you retyped — issue the payload as the final content for the ` +
+		`selected range only, and widen the range to consume any keeper you restate.`
+	);
+}
+
+/**
  * Normalize replacement groups so common off-by-one boundaries do not duplicate
  * unchanged surrounding lines or structural closers. Returns the repaired edit
  * list plus one warning per repaired group.
@@ -481,6 +625,16 @@ function repairReplacementBoundaries(
 			computeDelimiterBalance(fileLines.slice(group.startLine - 1, group.endLine)),
 		);
 		if (balanceIsZero(delta)) {
+			const oneSided = findOneSidedBoundaryEcho(group, fileLines);
+			if (oneSided) {
+				warnings.push(describeOneSidedEchoRepair(group, oneSided.side, oneSided.count));
+				const trimmed =
+					oneSided.side === "leading"
+						? inserts.slice(oneSided.count)
+						: inserts.slice(0, inserts.length - oneSided.count);
+				out.push(...trimmed, ...deletes);
+				continue;
+			}
 			out.push(...inserts, ...deletes);
 			continue;
 		}
@@ -538,7 +692,7 @@ function repairReplacementBoundaries(
 // content lines are never crossed) places the body at the depth its
 // indentation names.
 //
-// Inward (block-lowered inserts only): `insert after block N:` anchors on the
+// Inward (block-lowered inserts only): `insert_after_block N:` anchors on the
 // resolved block's closing line, but a body indented deeper than that closer
 // claims a depth inside the block — the common misreading of the op as
 // "append at the end of block N's body". Sliding the landing point backward
@@ -576,7 +730,7 @@ interface AfterInsertGroup {
 	anchor: number;
 	/** Indices into the edit list, in patch order. */
 	members: number[];
-	/** First line of the resolved block when lowered from `insert after block N:`. */
+	/** First line of the resolved block when lowered from `insert_after_block N:`. */
 	blockStart?: number;
 }
 
@@ -676,7 +830,7 @@ function resolveInwardLanding(
 /**
  * Slide mis-anchored after-insert hunks to the depth their body indentation
  * claims: outward past the structural closer lines that follow the anchor
- * when the body is shallower, or — for `insert after block N:` lowerings —
+ * when the body is shallower, or — for `insert_after_block N:` lowerings —
  * inward across the block's trailing closers when the body is deeper than
  * the block's closing line. Returns the corrected edit list plus one warning
  * per shifted hunk.

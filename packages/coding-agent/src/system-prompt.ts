@@ -4,6 +4,8 @@
 
 import * as os from "node:os";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { ToolExample, TSchema } from "@oh-my-pi/pi-ai";
+import { renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
 import { $env, getGpuCachePath, getProjectDir, hasFsCode, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { contextFileCapability } from "./capability/context-file";
@@ -330,6 +332,10 @@ export interface SystemPromptToolMetadata {
 	description: string;
 	/** Tool name the model sees on the provider wire. Defaults to the internal tool name. */
 	wireName?: string;
+	/** Tool parameters schema (Zod or JSON Schema), fed to the verbose inventory renderer. */
+	parameters?: TSchema;
+	/** Illustrative examples rendered into the verbose inventory. */
+	examples?: readonly ToolExample[];
 }
 
 export function buildSystemPromptToolMetadata(
@@ -349,6 +355,8 @@ export function buildSystemPromptToolMetadata(
 					label: override?.label ?? (typeof toolRecord.label === "string" ? toolRecord.label : ""),
 					description:
 						override?.description ?? (typeof toolRecord.description === "string" ? toolRecord.description : ""),
+					parameters: toolRecord.parameters,
+					examples: toolRecord.examples,
 					wireName,
 				},
 			] as const;
@@ -367,6 +375,12 @@ export interface BuildSystemPromptOptions {
 	appendSystemPrompt?: string;
 	/** Repeat full tool descriptions in system prompt. Default: false */
 	repeatToolDescriptions?: boolean;
+	/**
+	 * Whether provider-native tool calling is active (no owned/in-band syntax).
+	 * When true and `repeatToolDescriptions` is false, the inventory renders as a
+	 * compact tool-name list; otherwise it renders full `# Tool:` sections. Default: true
+	 */
+	nativeTools?: boolean;
 	/** Skills settings for discovery. */
 	skillsSettings?: SkillsSettings;
 	/** Working directory. Default: getProjectDir() */
@@ -385,6 +399,10 @@ export interface BuildSystemPromptOptions {
 	mcpDiscoveryServerSummaries?: string[];
 	/** Encourage the agent to delegate via tasks unless changes are trivial. */
 	eagerTasks?: boolean;
+	/** When true, the Eager Tasks section uses the hard MUST/ONLY wording (`task.eager: always`) rather than the softer `preferred` nudge. */
+	eagerTasksAlways?: boolean;
+	/** Whether `task.batch` is enabled; gates batch-call guidance in the Eager Tasks section. */
+	taskBatch?: boolean;
 	/** Rules with alwaysApply=true — their full content is injected into the prompt. */
 	alwaysApplyRules?: AlwaysApplyRule[];
 	/** Whether secret obfuscation is active. When true, explains the redaction format in the prompt. */
@@ -416,6 +434,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		tools,
 		appendSystemPrompt,
 		repeatToolDescriptions = false,
+		nativeTools = true,
 		skillsSettings,
 		toolNames: providedToolNames,
 		cwd,
@@ -427,6 +446,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		mcpDiscoveryMode = false,
 		mcpDiscoveryServerSummaries = [],
 		eagerTasks = false,
+		eagerTasksAlways = false,
+		taskBatch = true,
 		secretsEnabled = false,
 		workspaceTree: providedWorkspaceTree,
 		memoryRootEnabled = false,
@@ -569,6 +590,20 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		label: tools?.get(name)?.label ?? "",
 		description: tools?.get(name)?.description ?? "",
 	}));
+	const inventoryTools = toolNames.map(name => {
+		const meta = tools?.get(name);
+		return {
+			name: toolPromptNames.get(name) ?? name,
+			description: meta?.description ?? "",
+			parameters: meta?.parameters ?? ({ type: "object" } as TSchema),
+			examples: meta?.examples,
+		};
+	});
+	// List mode shows a compact tool-name list; it only applies when descriptions
+	// are not repeated AND native tool calling is active (the model already has the
+	// schemas). Otherwise render full `# Tool:` sections.
+	const toolListMode = !repeatToolDescriptions && nativeTools;
+	const toolInventory = toolListMode ? "" : renderToolInventory(inventoryTools, model ?? "");
 
 	// Filter skills for the rendered system prompt:
 	// - require the `read` tool so the model can actually fetch skill content;
@@ -580,7 +615,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedCustomPrompt,
 		resolvedAppendPrompt,
 	]);
-	const promptSources = [effectiveSystemPromptCustomization, resolvedCustomPrompt, resolvedAppendPrompt];
+	const contextPromptSources = contextFiles.map(file => file.content);
+	const promptSources = [
+		effectiveSystemPromptCustomization,
+		resolvedCustomPrompt,
+		resolvedAppendPrompt,
+		...contextPromptSources,
+	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
 	const environment = await logger.time("getEnvironmentInfo", getEnvironmentInfo);
@@ -590,7 +631,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		appendPrompt: resolvedAppendPrompt ?? "",
 		tools: toolNames,
 		toolInfo,
+		toolInventory,
 		repeatToolDescriptions,
+		toolListMode,
 		toolRefs,
 		environment,
 		contextFiles,
@@ -610,6 +653,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasMCPDiscoveryServers: mcpDiscoveryServerSummaries.length > 0,
 		mcpDiscoveryServerSummaries,
 		eagerTasks,
+		eagerTasksAlways,
+		taskBatch,
 		secretsEnabled,
 		hasMemoryRoot: memoryRootEnabled,
 		hasObsidian: hasObsidian(),

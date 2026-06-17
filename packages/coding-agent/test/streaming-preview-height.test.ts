@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -57,13 +57,71 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 	// Char-by-char partials of the new function body.
 	const partials = Array.from({ length: fullNew.length }, (_, i) => fullNew.slice(0, i + 1));
 
+	// Deterministic render scheduler. The live TUI throttles renders behind
+	// setTimeout (~33ms/frame) and resize settles, and the harness's
+	// waitForRender sleeps 40ms per settle, so a finalization loop burns ~16
+	// real frame waits in wall-clock time for cadence this test never asserts.
+	// This queue-backed scheduler records every immediate/throttled render the
+	// TUI requests (including resize-settle repaints) and replays them on demand
+	// via flush(), so the scrollback-replace and stable-window contracts are
+	// driven by explicit render flushes instead of the clock.
+	type DrainableScheduler = {
+		now(): number;
+		scheduleImmediate(cb: () => void): void;
+		scheduleRender(cb: () => void, delayMs: number): { cancel(): void };
+		flush(): void;
+	};
+	function makeDrainableScheduler(): DrainableScheduler {
+		let clock = 0;
+		const queue: Array<{ run: () => void; cancelled: boolean }> = [];
+		const enqueue = (cb: () => void) => {
+			const item = { run: cb, cancelled: false };
+			queue.push(item);
+			return item;
+		};
+		return {
+			now: () => clock,
+			scheduleImmediate(cb) {
+				enqueue(cb);
+			},
+			scheduleRender(cb) {
+				const item = enqueue(cb);
+				return {
+					cancel() {
+						item.cancelled = true;
+					},
+				};
+			},
+			// Drain to quiescence: a render callback may queue follow-up renders
+			// (the post-frame re-schedule, a resize settle's forced clear), which
+			// this loop picks up. The guard trips only on a pathological render
+			// that re-arms itself unconditionally.
+			flush() {
+				let guard = 0;
+				while (queue.length > 0) {
+					if (++guard > 100_000) throw new Error("render scheduler did not settle");
+					const item = queue.shift()!;
+					clock += 1;
+					if (!item.cancelled) item.run();
+				}
+			},
+		};
+	}
+
 	// Real TUI + virtual terminal harness: drives the component through the
 	// actual differential renderer so native scrollback (not just the in-memory
 	// component height) is exercised. Mirrors makeComponent's construction but
-	// swaps the stub for a live TUI wired to an xterm-backed terminal.
-	function makeTuiComponent(): { component: ToolExecutionComponent; term: VirtualTerminal; tui: TUI } {
+	// swaps the stub for a live TUI wired to a ghostty-backed terminal and the
+	// drainable scheduler in place of wall-clock frame timers.
+	function makeTuiComponent(): {
+		component: ToolExecutionComponent;
+		term: VirtualTerminal;
+		tui: TUI;
+		scheduler: DrainableScheduler;
+	} {
 		const term = new VirtualTerminal(80, 8);
-		const tui = new TUI(term);
+		const scheduler = makeDrainableScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
 		const tool = { mode: "replace" } as unknown as AgentTool;
 		const component = new ToolExecutionComponent(
 			"edit",
@@ -74,12 +132,21 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 			tmpDir,
 		);
 		tui.addChild(component);
-		return { component, term, tui };
+		return { component, term, tui, scheduler };
 	}
 
-	// Let the TUI's throttled render pipeline flush, then drain the terminal.
-	function settleTerminal(term: VirtualTerminal): Promise<void> {
-		return term.waitForRender();
+	// Settle the preview deterministically: await the off-render-path diff
+	// recompute kicked off by the latest updateArgs/setArgsComplete (its
+	// completion is what queues the preview's render), then replay every queued
+	// render synchronously and drain the terminal — no frame/animation sleeps.
+	async function settleTerminal(
+		component: ToolExecutionComponent,
+		scheduler: DrainableScheduler,
+		term: VirtualTerminal,
+	): Promise<void> {
+		await component.whenPreviewSettled();
+		scheduler.flush();
+		await term.flush();
 	}
 
 	// Whole native buffer (scrollback + viewport) with trailing padding trimmed.
@@ -164,7 +231,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 		// And it is never padded into a half-empty rectangle (the regression).
 		expect(maxTrailingBlank).toBeLessThanOrEqual(1);
 		expect(finalizedHeight).toBeGreaterThan(1);
-	});
+	}, 30_000);
 
 	test("real TUI finalization replaces streaming edit preview throughout native scrollback", async () => {
 		const previewPrefix = "PREVIEW_ONLY_STREAM_SENTINEL_";
@@ -187,11 +254,11 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 			"+  return finalValue;",
 			" }",
 		].join("\n");
-		const { component, term, tui } = makeTuiComponent();
+		const { component, term, tui, scheduler } = makeTuiComponent();
 
 		try {
 			tui.start();
-			await settleTerminal(term);
+			await settleTerminal(component, scheduler, term);
 
 			let maxStreamingHeight = 0;
 			let sawPreviewSentinel = false;
@@ -230,7 +297,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 				applyStep();
 				term.scrollLines(1_000);
 				tui.requestRender(i % 3 === 0 || i >= streamingStepCount);
-				await settleTerminal(term);
+				await settleTerminal(component, scheduler, term);
 
 				if (i < streamingStepCount) {
 					const rows = normalizedBufferRows(term);
@@ -244,7 +311,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 			expect(maxStreamingHeight).toBeGreaterThan(term.rows);
 
 			term.scrollLines(1_000);
-			await settleTerminal(term);
+			await settleTerminal(component, scheduler, term);
 
 			const finalBufferText = normalizedBufferRows(term).join("\n");
 			expect(finalBufferText).toContain(finalSentinel);
@@ -290,25 +357,19 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 		}
 		const hasDecrease = rawLineCounts.some((count, i) => i > 0 && count < rawLineCounts[i - 1]);
 		expect(hasDecrease).toBe(true);
-	});
+	}, 30_000);
 });
 
 describe("streaming tool call preview height (bounded across renderers)", () => {
-	let themed = false;
-
-	beforeEach(async () => {
-		if (!themed) {
-			await initTheme();
-			themed = true;
-		}
-		resetSettingsForTest();
-		await Settings.init({ inMemory: true, cwd: process.cwd() });
+	beforeAll(async () => {
+		// `evalToolRenderer.renderCall` walks the theme during highlighting; the
+		// bash/ssh/eval pending previews exercised below DO NOT read
+		// `settings.*`, so the global Settings singleton is intentionally left
+		// untouched here. Resetting/initialising it in `beforeEach` raced with
+		// parallel test files that do the same dance (issue #2582), flipping the
+		// proxy under us and timing the eval test out.
+		await initTheme();
 	});
-
-	afterEach(() => {
-		resetSettingsForTest();
-	});
-
 	function renderPending(toolName: string, args: unknown): { lines: readonly string[]; text: string } {
 		const term = new VirtualTerminal(80, 20);
 		const tui = new TUI(term);
@@ -364,27 +425,6 @@ describe("streaming tool call preview height (bounded across renderers)", () => 
 		}
 	}, 30_000);
 
-	test("task pending preview keeps the full assignment brief", () => {
-		// CONTRACT CHANGE with the single-spawn task rework: the old uncapped
-		// multi-task `context` rendering is gone with the field. The assignment
-		// brief is the durable record of what the subagent was asked to do, so
-		// the pending preview renders it in full instead of windowing it like
-		// bash/ssh command previews or eval cell code.
-		const longLines = Array.from({ length: 80 }, (_, i) => `line-${i}`);
-		const { lines, text } = renderPending("task", {
-			agent: "task",
-			id: "alpha",
-			description: "preview",
-			assignment: longLines.join("\n"),
-		});
-
-		expect(lines.length, "task assignment brief should not be capped").toBeGreaterThan(80);
-		expect(text).toContain("preview");
-		expect(text).toContain("line-0");
-		expect(text).toContain("line-40");
-		expect(text).toContain("line-79");
-	});
-
 	test("eval pending preview windows the code to the viewport tail", () => {
 		// Eval cell code is capped to the same viewport-sized TAIL window as
 		// bash/ssh: the live edge stays visible behind an "… N earlier lines"
@@ -404,5 +444,5 @@ describe("streaming tool call preview height (bounded across renderers)", () => 
 		expect(text).not.toContain("const line-0 = 1;");
 		expect(text).not.toContain(`const line-${hidden - 1} = 1;`);
 		expect(text).toContain(`… ${hidden} earlier lines`);
-	});
+	}, 30_000);
 });

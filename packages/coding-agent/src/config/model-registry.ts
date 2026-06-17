@@ -24,9 +24,11 @@ import {
 	resolveVariantAlias,
 } from "@oh-my-pi/pi-catalog/variant-collapse";
 
-// Sentinel for local-only OAuth token (LM Studio, vLLM) — declared inline to avoid loading
-// any provider module at startup. Must match `DEFAULT_LOCAL_TOKEN` in oauth/lm-studio.ts.
+// Sentinels for local-only OAuth tokens — declared inline to avoid loading
+// provider modules at startup. Must match packages/ai/src/registry/lm-studio.ts
+// and packages/ai/src/registry/vllm.ts.
 const DEFAULT_LOCAL_TOKEN = "lm-studio-local";
+const DEFAULT_VLLM_LOCAL_TOKEN = "vllm-local";
 
 const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
 	"google-antigravity",
@@ -57,7 +59,7 @@ import {
 	resolveCanonicalVariant,
 	resolveModelReference,
 } from "@oh-my-pi/pi-catalog/identity";
-import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { isBunTestRuntime, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { parseModelString, resolveProviderModelReference } from "../config/model-resolver";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
@@ -82,6 +84,10 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 	return Boolean(apiKey) && apiKey !== kNoAuth;
 }
 
+function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiKey is string {
+	return isAuthenticated(apiKey) && apiKey !== DEFAULT_LOCAL_TOKEN && apiKey !== DEFAULT_VLLM_LOCAL_TOKEN;
+}
+
 /** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
 interface ProviderOverride {
 	baseUrl?: string;
@@ -102,9 +108,19 @@ interface ProviderOverride {
  *      `token-plan-sgp.xiaomimimo.com` at discovery time)
  *   3. Existing bundled baseUrl (the host baked into `models.json`)
  *
+ * `transport` resolution priority:
+ *   1. `providerOverride.transport` (e.g. `pi-native` for auth-gateway users)
+ *   2. `existing.transport` (carried over from boot-time override application)
+ *   3. `model.transport` (rarely set — discovery defaults omit it)
+ *
  * Without (1), the user's override would lose to discovery; without (2)
  * preferred over (3), the bundled `api.xiaomimimo.com` would shadow the
  * tp- token-plan host and produce 401s on the first stream call.
+ * Without explicit transport propagation, an openrouter (or any) entry
+ * marked `transport: pi-native` in models.yml silently reverts to the
+ * default openai-completions transport after the background catalog
+ * refresh — so the first `/model` switch after boot hits the raw OpenAI
+ * chat-completions URL instead of the gateway's `/v1/pi/stream` (#2555).
  * See `xiaomi-tp-discovery-merge.test.ts` and the `refresh()` baseUrl-override
  * regression in `model-registry.test.ts`.
  */
@@ -114,10 +130,13 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	providerOverride?: Pick<ProviderOverride, "baseUrl" | "headers" | "transport">,
 ): Model<TApi> {
 	if (existing) {
+		const supportsTools = model.supportsTools ?? existing.supportsTools;
 		return buildModel({
 			...model,
 			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
 			headers: existing.headers ? { ...existing.headers, ...model.headers } : model.headers,
+			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
+			...(supportsTools !== undefined ? { supportsTools } : {}),
 			compat: model.compatConfig,
 		} as ModelSpec<TApi>);
 	}
@@ -353,6 +372,7 @@ interface ModelPatch {
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
 	input?: ("text" | "image")[];
+	supportsTools?: boolean;
 	cost?: Partial<Model<Api>["cost"]>;
 	contextWindow?: number;
 	maxTokens?: number;
@@ -378,6 +398,7 @@ function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTr
 	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
 	if (patch.input !== undefined) result.input = patch.input;
+	if (patch.supportsTools !== undefined) result.supportsTools = patch.supportsTools;
 	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;
@@ -489,6 +510,7 @@ function buildCustomModelOverlay(
 		reasoning: modelDef.reasoning,
 		thinking: modelDef.thinking,
 		input: modelDef.input,
+		supportsTools: modelDef.supportsTools,
 		cost: modelDef.cost,
 		contextWindow: modelDef.contextWindow,
 		maxTokens: modelDef.maxTokens,
@@ -518,6 +540,7 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		reference?.cost ??
 		(options.useDefaults ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : undefined);
 	const input = resolvedModel.input ?? reference?.input ?? (options.useDefaults ? ["text"] : undefined);
+	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
 	return buildModel({
 		id: resolvedModel.id,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
@@ -527,6 +550,7 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),
 		thinking: resolvedModel.thinking ?? reference?.thinking,
 		input: input as ("text" | "image")[],
+		...(supportsTools !== undefined ? { supportsTools } : {}),
 		cost,
 		contextWindow: resolvedModel.contextWindow ?? reference?.contextWindow ?? (options.useDefaults ? 128000 : null),
 		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults ? 16384 : null),
@@ -666,7 +690,11 @@ export class ModelRegistry {
 		modelsPath?: string,
 		options?: { fetch?: FetchImpl },
 	) {
-		this.#fetch = options?.fetch ?? fetch;
+		this.#fetch =
+			options?.fetch ??
+			(isBunTestRuntime()
+				? () => Promise.reject(new Error("network disabled in model-registry runtime test"))
+				: fetch);
 		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath);
 		this.#cacheDbPath = modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined;
 		// Set up fallback resolver for custom provider API keys
@@ -861,10 +889,12 @@ export class ModelRegistry {
 	#mergeResolvedModels(baseModels: Model<Api>[], replacementModels: Model<Api>[]): Model<Api>[] {
 		return mergeByModelKey(baseModels, replacementModels, (existing, replacementModel) => {
 			if (!existing) return replacementModel;
+			const supportsTools = replacementModel.supportsTools ?? existing.supportsTools;
 			return {
 				...replacementModel,
 				contextWindow: replacementModel.contextWindow ?? existing.contextWindow,
 				maxTokens: replacementModel.maxTokens ?? existing.maxTokens,
+				...(supportsTools !== undefined ? { supportsTools } : {}),
 			};
 		});
 	}
@@ -889,6 +919,18 @@ export class ModelRegistry {
 		});
 	}
 
+	#resolveStartupModelCacheProviderId(providerId: string): string {
+		const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
+		if (!descriptor) {
+			return providerId;
+		}
+		const baseUrl =
+			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
+			this.#providerOverrides.get(providerId)?.baseUrl ??
+			this.getProviderBaseUrl(providerId);
+		return descriptor.createModelManagerOptions({ baseUrl, fetch: this.#fetch }).cacheProviderId ?? providerId;
+	}
+
 	#loadCachedStandardProviderModels(): { models: Model<Api>[]; authoritativeFreshProviders: Set<string> } {
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
 		const cachedModels: Model<Api>[] = [];
@@ -897,7 +939,8 @@ export class ModelRegistry {
 			if (configuredDiscoveryProviders.has(providerId)) {
 				continue;
 			}
-			const cache = readModelCache<Api>(providerId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
+			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
+			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 			if (!cache) {
 				continue;
 			}
@@ -927,7 +970,12 @@ export class ModelRegistry {
 	#loadCachedDiscoverableModels(): Model<Api>[] {
 		const cachedModels: Model<Api>[] = [];
 		for (const providerConfig of this.#discoverableProviders) {
-			const cache = readModelCache<Api>(providerConfig.provider, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
+			const cache = readModelCache<Api>(
+				this.#configuredDiscoveryCacheProviderId(providerConfig),
+				24 * 60 * 60 * 1000,
+				Date.now,
+				this.#cacheDbPath,
+			);
 			if (!cache) {
 				this.#providerDiscoveryStates.set(providerConfig.provider, {
 					provider: providerConfig.provider,
@@ -1189,11 +1237,19 @@ export class ModelRegistry {
 		this.#rebuildCanonicalIndex();
 	}
 
+	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
+		if (providerConfig.discovery.type === "openai-models-list") {
+			return `${providerConfig.provider}:openai-models-list-context-v2`;
+		}
+		return providerConfig.provider;
+	}
+
 	async #discoverProviderModels(
 		providerConfig: DiscoveryProviderConfig,
 		strategy: ModelRefreshStrategy,
 	): Promise<Model<Api>[]> {
-		const cached = readModelCache<Api>(providerConfig.provider, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
+		const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
+		const cached = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 		const requiresAuth = !this.#keylessProviders.has(providerConfig.provider);
 		if (requiresAuth) {
 			const apiKey = await this.#peekApiKeyForProvider(providerConfig.provider);
@@ -1231,6 +1287,7 @@ export class ModelRegistry {
 			providerId,
 			staticModels: [],
 			cacheDbPath: this.#cacheDbPath,
+			cacheProviderId,
 			cacheTtlMs: 24 * 60 * 60 * 1000,
 			fetchDynamicModels,
 		});
@@ -1272,7 +1329,9 @@ export class ModelRegistry {
 			fetch: this.#fetch,
 			getBearerApiKeyResolver: async provider => {
 				const apiKey = await this.getApiKeyForProvider(provider);
-				if (!apiKey || apiKey === DEFAULT_LOCAL_TOKEN || apiKey === kNoAuth) return undefined;
+				if (!isDiscoveryBearerApiKey(apiKey)) {
+					return undefined;
+				}
 				return this.resolver(provider);
 			},
 		};
@@ -1377,11 +1436,20 @@ export class ModelRegistry {
 		for (let i = 0; i < standardProviderDescriptors.length; i++) {
 			const descriptor = standardProviderDescriptors[i];
 			const apiKey = standardProviderKeys[i];
-			if (isAuthenticated(apiKey) || descriptor.allowUnauthenticated) {
+			const hasExplicitVllmConfig =
+				descriptor.providerId === "vllm" &&
+				(this.#runtimeProviderOverrides.has(descriptor.providerId) ||
+					this.#providerOverrides.has(descriptor.providerId) ||
+					this.#keylessProviders.has(descriptor.providerId));
+			if (isAuthenticated(apiKey) || descriptor.allowUnauthenticated || hasExplicitVllmConfig) {
+				const discoveryBaseUrl =
+					this.#runtimeProviderOverrides.get(descriptor.providerId)?.baseUrl ??
+					this.#providerOverrides.get(descriptor.providerId)?.baseUrl ??
+					this.getProviderBaseUrl(descriptor.providerId);
 				options.push(
 					descriptor.createModelManagerOptions({
-						apiKey: isAuthenticated(apiKey) ? apiKey : undefined,
-						baseUrl: this.getProviderBaseUrl(descriptor.providerId),
+						apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
+						baseUrl: discoveryBaseUrl,
 						fetch: this.#fetch,
 					}),
 				);
@@ -2150,6 +2218,7 @@ export interface ProviderConfigInput {
 		reasoning: boolean;
 		thinking?: ThinkingConfig;
 		input: ("text" | "image")[];
+		supportsTools?: boolean;
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
 		maxTokens: number;

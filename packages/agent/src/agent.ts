@@ -3,7 +3,7 @@
  */
 import { isPromise } from "node:util/types";
 import {
-	type ApiKeyResolveContext,
+	type ApiKey,
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	type Context,
@@ -22,11 +22,12 @@ import {
 	type ToolChoice,
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { abortReasonText, agentLoop, agentLoopContinue } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
-import type { HarmonyAuditEvent } from "./harmony-leak";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -130,6 +131,8 @@ export interface AgentOptions {
 	 * Custom stream function (for proxy backends, etc.). Default uses streamSimple.
 	 */
 	streamFn?: StreamFn;
+	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
+	deadline?: number;
 
 	/**
 	 * Optional session identifier forwarded to LLM providers.
@@ -147,10 +150,10 @@ export interface AgentOptions {
 	providerSessionState?: Map<string, ProviderSessionState>;
 
 	/**
-	 * Resolves an API key dynamically for each LLM call.
-	 * Useful for expiring tokens (e.g., GitHub Copilot OAuth).
+	 * Resolves an API key or resolver dynamically for each LLM call.
+	 * Useful for expiring tokens and model-scoped credential routing.
 	 */
-	getApiKey?: (provider: string, ctx?: ApiKeyResolveContext) => Promise<string | undefined> | string | undefined;
+	getApiKey?: (model: Model) => Promise<ApiKey | undefined> | ApiKey | undefined;
 
 	/**
 	 * Inspect or replace provider payloads before they are sent.
@@ -220,6 +223,15 @@ export interface AgentOptions {
 
 	/** Enable intent tracing schema injection/stripping in the harness. */
 	intentTracing?: boolean;
+	/** Owned tool-calling dialect. Undefined keeps provider-native tool calling. */
+	dialect?: Dialect;
+	/**
+	 * When owned tool calling is active and the model fabricates a tool result
+	 * mid-turn: `true` (default) aborts the provider request immediately; `false`
+	 * drains the request and discards the fabricated continuation. Forwarded to
+	 * the loop's {@link AgentLoopConfig.abortOnFabricatedToolResult}.
+	 */
+	abortOnFabricatedToolResult?: boolean;
 	/** Dynamic tool choice override, resolved per LLM call. */
 	getToolChoice?: () => ToolChoice | undefined;
 
@@ -293,6 +305,7 @@ export class Agent {
 	#followUpMode: "all" | "one-at-a-time";
 	#interruptMode: "immediate" | "wait";
 	#sessionId?: string;
+	#deadline?: number;
 	#promptCacheKey?: string;
 	#metadata?: Record<string, unknown>;
 	#metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
@@ -316,6 +329,8 @@ export class Agent {
 	#preferWebsockets?: boolean;
 	#transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
 	#intentTracing: boolean;
+	#dialect?: Dialect;
+	#abortOnFabricatedToolResult?: boolean;
 	#getToolChoice?: () => ToolChoice | undefined;
 	#onPayload?: SimpleStreamOptions["onPayload"];
 	#onResponse?: SimpleStreamOptions["onResponse"];
@@ -323,6 +338,7 @@ export class Agent {
 	#onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
 	#onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	#onBeforeYield?: () => Promise<void> | void;
+	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<void> | void;
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
@@ -331,7 +347,7 @@ export class Agent {
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
 
 	streamFn: StreamFn;
-	getApiKey?: (provider: string, ctx?: ApiKeyResolveContext) => Promise<string | undefined> | string | undefined;
+	getApiKey?: (model: Model) => Promise<ApiKey | undefined> | ApiKey | undefined;
 	/**
 	 * Hook invoked after tool arguments are validated and before execution.
 	 * Reassign at any time to swap the implementation (e.g. on extension reload).
@@ -355,6 +371,7 @@ export class Agent {
 		this.#interruptMode = opts.interruptMode || "immediate";
 		this.streamFn = opts.streamFn || streamSimple;
 		this.#sessionId = opts.sessionId;
+		this.#deadline = opts.deadline;
 		this.#promptCacheKey = opts.promptCacheKey;
 		this.#providerSessionState = opts.providerSessionState;
 		this.#thinkingBudgets = opts.thinkingBudgets;
@@ -378,6 +395,8 @@ export class Agent {
 		this.#preferWebsockets = opts.preferWebsockets;
 		this.#transformToolCallArguments = opts.transformToolCallArguments;
 		this.#intentTracing = opts.intentTracing === true;
+		this.#dialect = opts.dialect;
+		this.#abortOnFabricatedToolResult = opts.abortOnFabricatedToolResult;
 		this.#getToolChoice = opts.getToolChoice;
 		this.#onAssistantMessageEvent = opts.onAssistantMessageEvent;
 		this.#onHarmonyLeak = opts.onHarmonyLeak;
@@ -625,6 +644,9 @@ export class Agent {
 	setOnBeforeYield(fn: (() => Promise<void> | void) | undefined): void {
 		this.#onBeforeYield = fn;
 	}
+	setOnTurnEnd(fn: ((messages: AgentMessage[], signal?: AbortSignal) => Promise<void> | void) | undefined): void {
+		this.#onTurnEnd = fn;
+	}
 
 	/**
 	 * Provide a source of non-interrupting "aside" messages (e.g. background-job
@@ -657,8 +679,8 @@ export class Agent {
 	}
 
 	// State mutators
-	setSystemPrompt(v: string[]) {
-		this.#state.systemPrompt = v;
+	setSystemPrompt(v: string[] | string) {
+		this.#state.systemPrompt = typeof v === "string" ? [v] : v;
 	}
 
 	setModel(m: Model) {
@@ -996,6 +1018,7 @@ export class Agent {
 			hideThinkingSummary: this.#hideThinkingSummary,
 			interruptMode: this.#interruptMode,
 			sessionId: this.#sessionId,
+			deadline: this.#deadline,
 			promptCacheKey: this.#promptCacheKey,
 			metadata: this.#metadataResolver ? undefined : this.#metadata,
 			metadataResolver: this.#metadataResolver,
@@ -1023,11 +1046,14 @@ export class Agent {
 			cursorOnToolResult,
 			transformToolCallArguments: this.#transformToolCallArguments,
 			intentTracing: this.#intentTracing,
+			dialect: this.#dialect,
+			abortOnFabricatedToolResult: this.#abortOnFabricatedToolResult,
 			appendOnlyContext: this.#appendOnlyContext,
 			beforeToolCall: this.beforeToolCall ? (ctx, signal) => this.beforeToolCall?.(ctx, signal) : undefined,
 			afterToolCall: this.afterToolCall ? (ctx, signal) => this.afterToolCall?.(ctx, signal) : undefined,
 			onAssistantMessageEvent: this.#onAssistantMessageEvent,
 			onHarmonyLeak: this.#onHarmonyLeak,
+			onTurnEnd: (messages, signal) => this.#onTurnEnd?.(messages, signal),
 			getToolChoice,
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,

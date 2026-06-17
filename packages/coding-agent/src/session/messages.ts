@@ -34,6 +34,15 @@ import { formatOutputNotice } from "../tools/output-meta";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
+export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
+
+/** Details persisted on a `/tan` background-dispatch breadcrumb. */
+export interface BackgroundTanDispatchDetails {
+	jobId: string;
+	work: string;
+	/** Forked clone session file, named `<agentId>.jsonl`; the Agent Hub reads its transcript. */
+	sessionFile: string;
+}
 
 export interface SkillPromptDetails {
 	name: string;
@@ -85,7 +94,7 @@ export function shouldRenderAbortReason(errorMessage: string | undefined): boole
 
 /** Sentinel `errorMessage` the agent stamps on any abort that carried no custom
  *  reason (bare `abort()`). Renderers treat it as "no specific reason given". */
-const GENERIC_ABORT_SENTINEL = "Request was aborted";
+export const GENERIC_ABORT_SENTINEL = "Request was aborted";
 
 /** Resolve the operator-facing label for an aborted assistant turn. A custom
  *  abort reason threaded onto `errorMessage` is returned verbatim; aborts with

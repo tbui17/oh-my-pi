@@ -53,7 +53,17 @@ export type SubmittedUserInput = {
 	 *  as a hidden agent-authored `developer` message rather than a visible user
 	 *  turn. Used by the `c`/`.` continue shortcut. */
 	synthetic?: boolean;
+	/** Marks this submission as a deliberate user resume (set by the `.`/`c`
+	 *  continue shortcut, which is also `synthetic`). Forwarded to
+	 *  `session.prompt({ userInitiated })` so it clears advisor auto-resume
+	 *  suppression even though it is synthetic. */
+	userInitiated?: boolean;
 	display?: boolean;
+	/** Queue intent if the session is (or becomes) busy when this submission is
+	 *  dispatched: "steer" (interrupt the active turn) or "followUp" (process after
+	 *  it). Normal user Enter carries "steer" to match the streaming-branch Enter;
+	 *  background/continuation submits omit it and default to "followUp". */
+	streamingBehavior?: "steer" | "followUp";
 	cancelled: boolean;
 	started: boolean;
 };
@@ -159,6 +169,9 @@ export interface InteractiveModeContext {
 	lastEscapeTime: number;
 	lastLeftTapTime: number;
 	shutdownRequested: boolean;
+	/** True once `shutdown()` has started. Read-only from the context;
+	 *  controllers use this to skip work that races with teardown. */
+	readonly isShuttingDown: boolean;
 	hookSelector: HookSelectorComponent | undefined;
 	hookInput: HookInputComponent | undefined;
 	hookEditor: HookEditorComponent | undefined;
@@ -219,6 +232,7 @@ export interface InteractiveModeContext {
 		imageLinks?: (string | undefined)[];
 		customType?: string;
 		display?: boolean;
+		streamingBehavior?: "steer" | "followUp";
 	}): SubmittedUserInput;
 	cancelPendingSubmission(): boolean;
 	markPendingSubmissionStarted(input: SubmittedUserInput): boolean;
@@ -261,6 +275,7 @@ export interface InteractiveModeContext {
 	handleShareCommand(): Promise<void>;
 	handleTodoCommand(args: string): Promise<void>;
 	handleSessionCommand(): Promise<void>;
+	handleAdvisorStatusCommand(): Promise<void>;
 	handleJobsCommand(): Promise<void>;
 	handleUsageCommand(reports?: UsageReport[] | null): Promise<void>;
 	handleChangelogCommand(showFull?: boolean): Promise<void>;
@@ -268,6 +283,7 @@ export interface InteractiveModeContext {
 	handleToolsCommand(): void;
 	handleContextCommand(): void;
 	handleDumpCommand(): void;
+	handleAdvisorDumpCommand(isRaw?: boolean): void;
 	handleDebugTranscriptCommand(): Promise<void>;
 	handleClearCommand(): Promise<void>;
 	handleFreshCommand(): Promise<void>;

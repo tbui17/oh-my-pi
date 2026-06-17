@@ -243,8 +243,8 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		// session/CLI model, the step-4 startup fallback used to pick the first
 		// anthropic model in models.json catalog order (claude-3-5-sonnet-20240620)
 		// instead of the provider's configured default from DEFAULT_MODEL_PER_PROVIDER
-		// (claude-opus-4-6).
-		const providerDefault = getBundledModel("anthropic", "claude-opus-4-6");
+		// (claude-opus-4-8).
+		const providerDefault = getBundledModel("anthropic", "claude-opus-4-8");
 		const catalogFirst = getBundledModel("anthropic", "claude-3-5-sonnet-20240620");
 		if (!providerDefault || !catalogFirst) {
 			throw new Error("Expected bundled anthropic models for fallback regression");
@@ -271,12 +271,52 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
+			skipPythonPreflight: true,
 		});
 
 		try {
 			expect(session.model?.provider).toBe("anthropic");
 			expect(session.model?.id).toBe(providerDefault.id);
 			expect(session.model?.id).not.toBe(catalogFirst.id);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("prefers Codex OAuth over plain OpenAI for the shared startup default", async () => {
+		const openaiDefault = getBundledModel("openai", "gpt-5.5");
+		const codexDefault = getBundledModel("openai-codex", "gpt-5.5");
+		if (!openaiDefault || !codexDefault) {
+			throw new Error("Expected bundled OpenAI and Codex GPT-5.5 defaults");
+		}
+
+		const authStorage = await AuthStorage.create(path.join(tempDir, "codex-fallback-auth.db"));
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey("openai", "sk-or-v1-invalid-openai-key");
+		authStorage.setRuntimeApiKey("openai-codex", "codex-oauth-token");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ enabledModels: ["openai/gpt-5.5", "openai-codex/gpt-5.5"] }),
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+
+		try {
+			expect(session.model?.provider).toBe("openai-codex");
+			expect(session.model?.id).toBe(codexDefault.id);
+			expect(session.model?.id).toBe(openaiDefault.id);
 		} finally {
 			await session.dispose();
 		}

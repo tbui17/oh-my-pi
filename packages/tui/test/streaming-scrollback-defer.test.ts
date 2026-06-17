@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
 	type Component,
 	type NativeScrollbackCommittedRows,
@@ -63,6 +63,24 @@ class CommittedRowsProbe extends AppendOnlyLiveLineList implements NativeScrollb
 	}
 }
 
+/**
+ * A live block that is DURABLE but not byte-stable: it reports a snapshot-safe
+ * end (its whole body is permanent content) but no commit-safe end, and it
+ * re-lays-out an interior row on every render (a streaming markdown table whose
+ * columns re-align as rows arrive). Its scrolled-off head must still reach
+ * native scrollback — frozen at its scroll-off snapshot — instead of being
+ * dropped, and the later drift of an already-committed row must NOT spray
+ * duplicate snapshots into history.
+ */
+class SnapshotLiveLineList extends LineList implements NativeScrollbackLiveRegion {
+	getNativeScrollbackLiveRegionStart(): number | undefined {
+		return 0;
+	}
+	getNativeScrollbackSnapshotSafeEnd(): number | undefined {
+		return Number.POSITIVE_INFINITY;
+	}
+}
+
 async function settle(term: VirtualTerminal): Promise<void> {
 	const nextTick = Promise.withResolvers<void>();
 	process.nextTick(nextTick.resolve);
@@ -105,6 +123,25 @@ function rows(prefix: string, count: number): string[] {
 }
 
 describe("streaming scrollback defer", () => {
+	let savedTerminalEnv: Record<string, string | undefined> = {};
+	beforeEach(() => {
+		// A resize on Warp takes the in-place path (no ED3), so neutralize the
+		// ambient terminal identity to keep the direct-terminal scrollback
+		// assertions below deterministic on any dev machine.
+		for (const key of ["TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"]) {
+			savedTerminalEnv[key] = Bun.env[key];
+			delete Bun.env[key];
+		}
+	});
+	afterEach(() => {
+		for (const key in savedTerminalEnv) {
+			const value = savedTerminalEnv[key];
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+		savedTerminalEnv = {};
+	});
+
 	it("keeps mutable live-region head rows out of native scrollback", async () => {
 		if (process.platform === "win32") return;
 		const term = new VirtualTerminal(20, 4);
@@ -512,6 +549,78 @@ describe("streaming scrollback defer", () => {
 			await settle(term);
 
 			expect(probe.committedRowsAtRender.at(-1)!).toBeGreaterThan(0);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("commits the scrolled-off head of a durable snapshot block even while it re-lays-out", async () => {
+		if (process.platform === "win32") return;
+		const term = new VirtualTerminal(20, 4);
+		overrideProbe(term, undefined);
+		const tui = new TUI(term);
+		// Durable but volatile: an interior row re-lays-out every frame (a table
+		// re-aligning), so it never earns a byte-stable commit-safe end. The block
+		// alone overflows the 4-row viewport. Its scrolled-off head must reach
+		// native scrollback (snapshot-safe end), not vanish like a volatile block.
+		const live = new SnapshotLiveLineList([]);
+
+		try {
+			tui.addChild(live);
+			tui.start();
+			await settle(term);
+
+			const writes = capture(term);
+
+			for (let n = 4; n <= 12; n++) {
+				const lines = rows("tbl-", n);
+				lines[1] = `tbl-1 [w${n}]`; // interior row re-lays-out every frame
+				live.setLines(lines);
+				tui.requestRender();
+				await settle(term);
+			}
+
+			const buffer = term.getScrollBuffer().map(line => line.trimEnd());
+			const joined = buffer.join("\n");
+			// No ED3, and every logical row reached the tape (scrollback or window).
+			expect(eraseScrollbackCount(writes)).toBe(0);
+			for (let i = 2; i < 12; i++) expect(joined).toContain(`tbl-${i}`);
+			// The interior row's snapshot is frozen (committed once); it is not lost.
+			expect(joined).toContain("tbl-1");
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("does not spray duplicate snapshots when an already-committed durable row drifts", async () => {
+		if (process.platform === "win32") return;
+		const term = new VirtualTerminal(20, 4);
+		overrideProbe(term, undefined);
+		const tui = new TUI(term);
+		const live = new SnapshotLiveLineList(rows("row-", 12));
+
+		try {
+			tui.addChild(live);
+			tui.start();
+			await settle(term);
+
+			// row-0 has long scrolled off and committed. Keep rewriting it (a
+			// scrolled-off table row re-aligning) while appending new rows. The
+			// committed-prefix audit must treat it as a durable snapshot and NOT
+			// re-anchor + recommit the whole prefix on every drift (a spray storm).
+			for (let n = 12; n <= 40; n++) {
+				const lines = rows("row-", n);
+				lines[0] = `row-0 [drift ${n}]`;
+				live.setLines(lines);
+				tui.requestRender();
+				await settle(term);
+			}
+
+			const buffer = term.getScrollBuffer().map(line => line.trimEnd());
+			// Without audit-exemption every drift frame recommits the whole prefix,
+			// so the tape would balloon far past the ~40 logical rows. Bound it.
+			expect(buffer.length).toBeLessThan(60);
+			expect(buffer.join("\n")).toContain("row-39");
 		} finally {
 			tui.stop();
 		}

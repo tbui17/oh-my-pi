@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@oh-my-pi/pi-ai",
-	"version": "15.12.6",
+	"version": "16.0.5",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"homepage": "https://omp.sh",
 	"author": "Can Boluk",
@@ -90,6 +90,14 @@
 		"./usage/*": {
 			"types": "./src/usage/*.ts",
 			"import": "./src/usage/*.ts"
+		},
+		"./utils/harmony-leak": {
+			"types": "./src/utils/harmony-leak.ts",
+			"import": "./src/utils/harmony-leak.ts"
+		},
+		"./dialect": {
+			"types": "./src/dialect/index.ts",
+			"import": "./src/dialect/index.ts"
 		},
 		"./utils/*": {
 			"types": "./src/utils/*.ts",

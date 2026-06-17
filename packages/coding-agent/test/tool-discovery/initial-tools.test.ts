@@ -16,7 +16,6 @@ import {
 const allToolsSettings = Settings.isolated({
 	"astGrep.enabled": true,
 	"astEdit.enabled": true,
-	"renderMermaid.enabled": true,
 	"debug.enabled": true,
 	"find.enabled": true,
 	"search.enabled": true,
@@ -28,6 +27,7 @@ const allToolsSettings = Settings.isolated({
 	"checkpoint.enabled": true,
 	"todo.enabled": true,
 	"memory.backend": "mnemopi",
+	"autolearn.enabled": true,
 	"tools.discoveryMode": "all",
 });
 

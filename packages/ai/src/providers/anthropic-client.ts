@@ -39,6 +39,8 @@ export interface AnthropicRequestOptions {
 	timeout?: number;
 	/** Per-request retry budget override. */
 	maxRetries?: number;
+	/** Per-request headers merged after client defaults. */
+	headers?: Record<string, string>;
 }
 
 /**
@@ -57,6 +59,8 @@ export type AnthropicFetchOptions = RequestInit & {
 		cert?: string;
 		key?: string;
 	};
+	/** Bun extension: see {@link FetchWithRetryOptions.timeout} — `false` disables Bun's native fetch TTFT timeout (issue #2422). */
+	timeout?: number | false;
 };
 
 export interface AnthropicClientOptions {
@@ -215,7 +219,7 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 		return new AnthropicApiRequest(() => this.#send(path, params, options));
 	}
 
-	#buildHeaders(): Record<string, string> {
+	#buildHeaders(requestHeaders?: Record<string, string>): Record<string, string> {
 		const opts = this.#options;
 		const defaults = opts.defaultHeaders ?? {};
 		const headers: Record<string, string> = {};
@@ -226,6 +230,7 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 			headers.Authorization = `Bearer ${opts.authToken}`;
 		}
 		Object.assign(headers, defaults);
+		Object.assign(headers, requestHeaders);
 		return headers;
 	}
 
@@ -240,7 +245,7 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 		const timeoutMs = options?.timeout ?? opts.timeout ?? DEFAULT_TIMEOUT_MS;
 		const maxRetries = Math.max(0, options?.maxRetries ?? opts.maxRetries ?? DEFAULT_MAX_RETRIES);
 		const url = `${opts.baseURL ?? "https://api.anthropic.com"}${path}`;
-		const headers = this.#buildHeaders();
+		const headers = this.#buildHeaders(options?.headers);
 		const body = JSON.stringify(params);
 
 		for (let attempt = 0; ; attempt++) {

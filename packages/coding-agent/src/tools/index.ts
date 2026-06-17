@@ -37,6 +37,7 @@ import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
+import type { BuiltinToolName } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
@@ -46,13 +47,14 @@ import { GithubTool } from "./gh";
 import { InspectImageTool } from "./inspect-image";
 import { IrcTool, isIrcEnabled } from "./irc";
 import { JobTool } from "./job";
+import { LearnTool } from "./learn";
+import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
 import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
-import { RenderMermaidTool } from "./render-mermaid";
 import { createReportToolIssueTool, isAutoQaEnabled } from "./report-tool-issue";
 import { ResolveTool } from "./resolve";
 import { reportFindingTool } from "./review";
@@ -84,12 +86,13 @@ export * from "./image-gen";
 export * from "./inspect-image";
 export * from "./irc";
 export * from "./job";
+export * from "./learn";
+export * from "./manage-skill";
 export * from "./memory-edit";
 export * from "./memory-recall";
 export * from "./memory-reflect";
 export * from "./memory-retain";
 export * from "./read";
-export * from "./render-mermaid";
 export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
@@ -409,13 +412,12 @@ export function filterInitialToolsForDiscoveryAll(
  * Public callable factory map. External callers may invoke `BUILTIN_TOOLS.read(session)` or
  * `BUILTIN_TOOLS[name](session)` to construct a tool directly.
  */
-export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
+export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	read: s => new ReadTool(s),
 	bash: s => new BashTool(s),
 	edit: s => new EditTool(s),
 	ast_grep: s => new AstGrepTool(s),
 	ast_edit: s => new AstEditTool(s),
-	render_mermaid: s => new RenderMermaidTool(s),
 	ask: AskTool.createIf,
 	debug: DebugTool.createIf,
 	eval: s => new EvalTool(s),
@@ -439,6 +441,8 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	retain: MemoryRetainTool.createIf,
 	recall: MemoryRecallTool.createIf,
 	reflect: MemoryReflectTool.createIf,
+	learn: LearnTool.createIf,
+	manage_skill: ManageSkillTool.createIf,
 };
 
 export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
@@ -449,7 +453,7 @@ export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 	goal: s => new GoalTool(s),
 };
 
-export type ToolName = keyof typeof BUILTIN_TOOLS;
+export type ToolName = BuiltinToolName;
 
 /**
  * Create tools from BUILTIN_TOOLS registry.
@@ -519,6 +523,21 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				if (!requestedTools.includes(name)) requestedTools.push(name);
 			}
 		}
+		// Auto-learn tools are gated by `autolearn.enabled` but, like the memory
+		// tools above, must also be force-included into an explicit requestedTools
+		// list so a restricted top-level session whose controller/guidance is
+		// active still exposes the tools the nudge points at. Gated to top-level
+		// (taskDepth 0): the controller only runs there, so a subagent's explicit
+		// tool whitelist must never be silently widened with write-capable tools.
+		if (session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0) {
+			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
+			if (
+				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "") &&
+				!requestedTools.includes("learn")
+			) {
+				requestedTools.push("learn");
+			}
+		}
 	}
 	// Resolve effective tool discovery mode.
 	// tools.discoveryMode controls the new modes; mcp.discoveryMode remains a back-compat alias for "mcp-only".
@@ -541,7 +560,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "github") return session.settings.get("github.enabled");
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
-		if (name === "render_mermaid") return session.settings.get("renderMermaid.enabled");
 		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
@@ -551,6 +569,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "irc") return isIrcEnabled(session.settings, session.taskDepth ?? 0);
 		if (name === "retain" || name === "recall" || name === "reflect") {
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
+		}
+		if (name === "manage_skill") return session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0;
+		if (name === "learn") {
+			return (
+				session.settings.get("autolearn.enabled") &&
+				(session.taskDepth ?? 0) === 0 &&
+				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
+			);
 		}
 		if (name === "task") {
 			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);

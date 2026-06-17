@@ -55,6 +55,7 @@ import type { PrintModeOptions } from "./modes/print-mode";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
+import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -68,6 +69,7 @@ import { resolveResumableSession, type SessionInfo } from "./session/session-lis
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { AUTO_THINKING } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
@@ -101,6 +103,10 @@ function maybeShowStartupSplash(options: {
 	//process.stdout.write(`${chalk.dim(`omp ${options.version}`)}\n${chalk.dim("Initializing session…")}\n`);
 }
 
+export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
+	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
+}
+
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!settings.get("startup.checkUpdate")) {
 		return;
@@ -122,11 +128,9 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 	}
 }
 
+// Todo settings are caller-controlled in protocol modes. Do not host-default them:
+// embedders need project-level opt-outs for reminder/prelude prompt injection.
 const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
-	"todo.enabled",
-	"todo.reminders",
-	"todo.reminders.max",
-	"todo.eager",
 	"task.isolation.mode",
 	"task.isolation.merge",
 	"task.isolation.commits",
@@ -140,6 +144,10 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	// memory should opt in explicitly through their own settings layer.
 	"memory.backend",
 	"memories.enabled",
+	// Advisor is interactive-session assistance. Protocol hosts opt in explicitly
+	// instead of inheriting a user's globally-enabled local preference.
+	"advisor.enabled",
+	"advisor.subagents",
 ];
 
 const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [
@@ -274,7 +282,19 @@ export async function submitInteractiveInput(
 
 	try {
 		using _keepalive = new EventLoopKeepalive();
-		const streamingBehavior = session.isStreaming ? ("followUp" as const) : undefined;
+		// Honor the submission's queue intent, defaulting to followUp. Reading
+		// `session.isStreaming` to decide queue-vs-fresh is NOT atomic with the
+		// eventual `agent.prompt()` call inside `session.prompt()`: a background turn
+		// (queued-message drain, idle compaction, goal/loop continuation timer) can
+		// flip the agent busy in the gap, and a bare prompt() would then throw
+		// AgentBusyError straight to an error toast even though the UI shows no
+		// "Working…". Passing a behavior unconditionally is a no-op when the session
+		// is genuinely idle (a fresh turn runs and the option is ignored) and queues
+		// the message instead of erroring when a turn is already underway. Normal
+		// user Enter carries "steer" (interrupt, matching the streaming-branch Enter);
+		// background/continuation submits omit it and fall back to "followUp". The
+		// synthetic branch below opts out by design.
+		const streamingBehavior = input.streamingBehavior ?? ("followUp" as const);
 		// Continue shortcuts submit an already-started synthetic developer prompt with
 		// no optimistic user message.
 		if (!input.started && !mode.markPendingSubmissionStarted(input)) {
@@ -287,9 +307,7 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent" as const,
 			};
-			await (streamingBehavior
-				? session.promptCustomMessage(message, { streamingBehavior })
-				: session.promptCustomMessage(message));
+			await session.promptCustomMessage(message, { streamingBehavior });
 		} else if (input.synthetic) {
 			// Synthetic continue shortcuts are hidden developer prompts. The streaming
 			// queue (#queueUserMessage) only carries user-attributed messages, so we do
@@ -297,9 +315,13 @@ export async function submitInteractiveInput(
 			// developer directive to a visible user message. A synthetic submit while
 			// streaming keeps its prior behavior (rejected as busy) rather than changing
 			// its role.
-			await session.prompt(input.text, { synthetic: true, expandPromptTemplates: false });
+			await session.prompt(input.text, {
+				synthetic: true,
+				expandPromptTemplates: false,
+				userInitiated: input.userInitiated,
+			});
 		} else {
-			await session.prompt(input.text, { images: input.images, ...(streamingBehavior && { streamingBehavior }) });
+			await session.prompt(input.text, { images: input.images, streamingBehavior });
 		}
 	} catch (error: unknown) {
 		const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
@@ -740,6 +762,9 @@ async function buildSessionOptions(
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
 	};
+	if (parsed.maxTime !== undefined) {
+		options.deadline = Date.now() + parsed.maxTime * 1000;
+	}
 
 	// Auto-discover SYSTEM.md if no CLI system prompt provided
 	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile();
@@ -926,7 +951,7 @@ export async function runRootCommand(
 	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
 
 	if (parsedArgs.version) {
-		process.stdout.write(`${VERSION}\n`);
+		writeStartupNotice(parsedArgs, `${VERSION}\n`);
 		process.exit(0);
 	}
 
@@ -941,7 +966,7 @@ export async function runRootCommand(
 			process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
 			process.exit(1);
 		}
-		process.stdout.write(`Exported to: ${result}\n`);
+		writeStartupNotice(parsedArgs, `Exported to: ${result}\n`);
 		process.exit(0);
 	}
 
@@ -1021,6 +1046,10 @@ export async function runRootCommand(
 	if (parsedArgs.hideThinking) {
 		settingsInstance.override("hideThinkingBlock", true);
 	}
+	// Apply --advisor CLI flag (ephemeral, not persisted)
+	if (parsedArgs.advisor) {
+		settingsInstance.override("advisor.enabled", true);
+	}
 
 	await logger.time(
 		"initTheme:final",
@@ -1073,7 +1102,7 @@ export async function runRootCommand(
 	// message rather than letting the decline bubble up as an uncaught exception
 	// (see issue #1668).
 	if (typeof parsedArgs.resume === "string" && !sessionManager) {
-		process.stdout.write(`${chalk.dim("Resume cancelled: session is in another project.")}\n`);
+		writeStartupNotice(parsedArgs, `${chalk.dim("Resume cancelled: session is in another project.")}\n`);
 		return;
 	}
 
@@ -1087,7 +1116,7 @@ export async function runRootCommand(
 			// picker can still open in all-projects scope instead of dead-ending.
 			preloadedAllSessions = await logger.time("SessionManager.listAll", SessionManager.listAll);
 			if (preloadedAllSessions.length === 0) {
-				process.stdout.write(`${chalk.dim("No sessions found")}\n`);
+				writeStartupNotice(parsedArgs, `${chalk.dim("No sessions found")}\n`);
 				return;
 			}
 			startInAllScope = true;
@@ -1099,7 +1128,7 @@ export async function runRootCommand(
 		});
 		resumeStartupWatchdog();
 		if (!selected) {
-			process.stdout.write(`${chalk.dim("No session selected")}\n`);
+			writeStartupNotice(parsedArgs, `${chalk.dim("No session selected")}\n`);
 			return;
 		}
 		// Resuming a session from another project: switch the process into that
@@ -1244,6 +1273,24 @@ export async function runRootCommand(
 			eventBus,
 			preloadedExtensions: extensionsResult,
 		});
+
+		// Cold-revive support: a `parked` subagent ref restored from disk (Agent Hub
+		// scan, collab mirror, resumed process) has a sessionFile but no in-memory
+		// reviver, so `ensureLive` (IRC sends, hub focus) would refuse it. Install a
+		// factory — bound to THIS top-level session — that rebuilds the subagent from
+		// its persisted JSONL (see persisted-revive.ts). Scoped to the non-ACP
+		// bootstrap: ACP keeps several concurrent top-level sessions and a single
+		// process-global factory must not be clobbered by the most recent one.
+		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
+			createPersistedSubagentReviverFactory({
+				session,
+				authStorage,
+				modelRegistry,
+				settings: settingsInstance,
+				enableLsp: sessionOptions.enableLsp ?? true,
+			}),
+			Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
+		);
 		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
 			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
 		}

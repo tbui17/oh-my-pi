@@ -272,8 +272,18 @@ interface CodexRequestSetup {
 	requestSignal: AbortSignal;
 	wrapCodexSseStream: (source: AsyncGenerator<Record<string, unknown>>) => AsyncGenerator<Record<string, unknown>>;
 	requestAbortController: AbortController;
+	firstEventTimeoutMs: number | undefined;
 	websocketIdleTimeoutMs: number | undefined;
 	websocketFirstEventTimeoutMs: number | undefined;
+}
+
+interface CodexOpenItem {
+	item: CodexEventItem;
+	block: CodexOutputBlock | null;
+	/** Index of {@link block} in `output.content`; `-1` when no block was created for this item. */
+	contentIndex: number;
+	itemId?: string;
+	outputIndex?: number;
 }
 
 interface CodexStreamRuntime {
@@ -281,6 +291,25 @@ interface CodexStreamRuntime {
 	requestBodyForState: RequestBody;
 	transport: CodexTransport;
 	websocketState?: CodexWebSocketSessionState;
+	/**
+	 * Items open on the wire keyed by `item.id`. `response.output_item.added`
+	 * registers here; `output_item.done` removes. A keyed event whose `item_id`
+	 * is not present is dropped rather than appended to a sibling.
+	 */
+	openItems: Map<string, CodexOpenItem>;
+	/**
+	 * Items open on the wire keyed by `output_index` for streams whose function
+	 * call items omit `id`; these still carry `output_index` on deltas/done.
+	 */
+	openItemsByOutputIndex: Map<number, CodexOpenItem>;
+	/**
+	 * Most recently added open item for events that omit both `item_id` and
+	 * `output_index`. Always tracks the latest `output_item.added`, including
+	 * fully keyless items that never make it into the keyed maps; cleared when
+	 * its item closes.
+	 */
+	currentEntry: CodexOpenItem | null;
+	/** Convenience mirrors of {@link currentEntry} for legacy singleton handlers. */
 	currentItem: CodexEventItem | null;
 	currentBlock: CodexOutputBlock | null;
 	nativeOutputItems: Array<Record<string, unknown>>;
@@ -657,6 +686,14 @@ function resetOutputState(output: AssistantMessage): void {
 	output.stopReason = "stop";
 	output.stopDetails = undefined;
 }
+async function applyCodexPayloadReplacement<T extends Record<string, unknown>>(
+	model: Model<"openai-codex-responses">,
+	options: OpenAICodexResponsesOptions | undefined,
+	payload: T,
+): Promise<T> {
+	const replacementPayload = await options?.onPayload?.(payload, model);
+	return replacementPayload !== undefined ? (replacementPayload as T) : payload;
+}
 
 function removeTransientBlockIndices(output: AssistantMessage): void {
 	for (const block of output.content) {
@@ -690,6 +727,7 @@ function createRequestSetup(options: OpenAICodexResponsesOptions | undefined): C
 		requestAbortController,
 		requestSignal,
 		wrapCodexSseStream,
+		firstEventTimeoutMs,
 		websocketIdleTimeoutMs,
 		websocketFirstEventTimeoutMs,
 	};
@@ -712,7 +750,6 @@ async function buildCodexRequestContext(
 	const promptCacheKey = resolveCodexPromptCacheKey(options);
 	const transportSessionId = resolveCodexTransportSessionId(options);
 	const transformedBody = await buildTransformedCodexRequestBody(model, context, options, promptCacheKey);
-	options?.onPayload?.(transformedBody);
 
 	const requestHeaders = { ...(model.headers ?? {}), ...(options?.headers ?? {}) };
 	const rawRequestDump: RawHttpRequestDump = {
@@ -848,6 +885,8 @@ async function openInitialCodexEventStream(
 		while (true) {
 			try {
 				return await openCodexWebSocketTransport(
+					model,
+					options,
 					requestContext,
 					requestSetup,
 					websocketState,
@@ -880,6 +919,8 @@ async function openInitialCodexEventStream(
 	return openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
 }
 async function openCodexWebSocketTransport(
+	model: Model<"openai-codex-responses">,
+	options: OpenAICodexResponsesOptions | undefined,
 	requestContext: CodexRequestContext,
 	requestSetup: CodexRequestSetup,
 	websocketState: CodexWebSocketSessionState,
@@ -893,7 +934,7 @@ async function openCodexWebSocketTransport(
 	const chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
 	// WebSocket frames cannot carry per-request HTTP headers, so the Responses
 	// Lite marker rides in `client_metadata` on every `response.create`.
-	const websocketRequest: Record<string, unknown> = {
+	const websocketRequest = await applyCodexPayloadReplacement(model, options, {
 		type: "response.create",
 		...chainedBody,
 		...(requestContext.responsesLite
@@ -904,7 +945,7 @@ async function openCodexWebSocketTransport(
 					},
 				}
 			: {}),
-	};
+	});
 	const websocketHeaders = createCodexHeaders(
 		requestContext.requestHeaders,
 		requestContext.accountId,
@@ -915,6 +956,7 @@ async function openCodexWebSocketTransport(
 		requestContext.responsesLite,
 	);
 	const requestBodyForState = structuredCloneJSON(requestContext.transformedBody);
+	requestContext.rawRequestDump.body = websocketRequest;
 	logCodexDebug("codex websocket request", {
 		url: toWebSocketUrl(requestContext.url),
 		model: requestContext.transformedBody.model,
@@ -986,13 +1028,15 @@ async function openCodexSseTransport(
 				state,
 				requestContext.responsesLite,
 				requestSetup.requestSignal,
+				requestSetup.firstEventTimeoutMs,
 				event => options?.onSseEvent?.(event, model),
 				options?.fetch,
 			),
 		);
 	};
-	recordCodexWebSocketRequestStats(state, body);
-	return { eventStream: await open(body), requestBodyForState: structuredCloneJSON(body), transport: "sse" };
+	const wireBody = await applyCodexPayloadReplacement(model, options, body);
+	recordCodexWebSocketRequestStats(state, wireBody);
+	return { eventStream: await open(wireBody), requestBodyForState: structuredCloneJSON(wireBody), transport: "sse" };
 }
 
 async function reopenCodexWebSocketRuntimeStream(
@@ -1002,6 +1046,8 @@ async function reopenCodexWebSocketRuntimeStream(
 ): Promise<void> {
 	try {
 		const next = await openCodexWebSocketTransport(
+			context.model,
+			context.options,
 			context.requestContext,
 			context.requestSetup,
 			state,
@@ -1058,6 +1104,9 @@ function createCodexStreamRuntime(initial: {
 		requestBodyForState: initial.requestBodyForState,
 		transport: initial.transport,
 		websocketState: initial.websocketState,
+		openItems: new Map(),
+		openItemsByOutputIndex: new Map(),
+		currentEntry: null,
 		currentItem: null,
 		currentBlock: null,
 		nativeOutputItems: [],
@@ -1068,6 +1117,48 @@ function createCodexStreamRuntime(initial: {
 		canSafelyReplayWebsocketOverSse: true,
 		whitespaceToolCallArgumentsDelta: undefined,
 	};
+}
+
+/**
+ * Wipe per-attempt accumulator state before a recovery path replays the turn.
+ * Keeps {@link CodexStreamRuntime.openItems} and the legacy singleton-current
+ * pointers in lockstep with {@link CodexStreamRuntime.nativeOutputItems} so a
+ * stale delta from the failed attempt can't bind to a sibling on the retry.
+ */
+function resetCodexStreamAccumulators(runtime: CodexStreamRuntime): void {
+	runtime.openItems.clear();
+	runtime.openItemsByOutputIndex.clear();
+	runtime.currentEntry = null;
+	runtime.currentItem = null;
+	runtime.currentBlock = null;
+	runtime.nativeOutputItems.length = 0;
+}
+
+/**
+ * Look up the open item a Codex stream event targets. `item_id` wins because it
+ * uniquely identifies a response item; `output_index` covers idless function
+ * call items. A keyed event whose target is already closed is dropped instead
+ * of being routed to a sibling. Only streams that omit both keys fall back to
+ * {@link CodexStreamRuntime.currentEntry} — the most recently added item,
+ * including fully keyless ones that never reached the keyed maps.
+ */
+function openItemForEvent(runtime: CodexStreamRuntime, rawEvent: Record<string, unknown>): CodexOpenItem | null {
+	const itemId = typeof rawEvent.item_id === "string" ? rawEvent.item_id : "";
+	if (itemId) return runtime.openItems.get(itemId) ?? null;
+	const outputIndex = readOptionalInteger(rawEvent.output_index);
+	if (outputIndex !== undefined) return runtime.openItemsByOutputIndex.get(outputIndex) ?? null;
+	return runtime.currentEntry;
+}
+
+function closeCodexOpenItem(runtime: CodexStreamRuntime, entry: CodexOpenItem | null | undefined): void {
+	if (!entry) return;
+	if (entry.itemId) runtime.openItems.delete(entry.itemId);
+	if (entry.outputIndex !== undefined) runtime.openItemsByOutputIndex.delete(entry.outputIndex);
+	if (runtime.currentEntry === entry) {
+		runtime.currentEntry = null;
+		runtime.currentItem = null;
+		runtime.currentBlock = null;
+	}
 }
 
 function resetWhitespaceToolCallArgumentsDelta(runtime: CodexStreamRuntime): void {
@@ -1191,11 +1282,25 @@ function handleCodexStreamEvent(
 		const item = rawEvent.item as CodexEventItem;
 		runtime.currentItem = item;
 		runtime.currentBlock = createOutputBlockForItem(item);
+		let contentIndex = -1;
+		if (runtime.currentBlock) {
+			output.content.push(runtime.currentBlock);
+			contentIndex = output.content.length - 1;
+		}
+		// Track every open item by every stable key the wire gives us. `item.id`
+		// is best; `output_index` preserves idless function/custom tool calls and
+		// keeps their final args authoritative when only `output_item.done`
+		// carries the full payload.
+		const itemId = typeof (item as { id?: string }).id === "string" ? (item as { id: string }).id : undefined;
+		const outputIndex = readOptionalInteger(rawEvent.output_index);
+		const entry: CodexOpenItem = { item, block: runtime.currentBlock, contentIndex, itemId, outputIndex };
+		runtime.currentEntry = entry;
+		if (itemId) runtime.openItems.set(itemId, entry);
+		if (outputIndex !== undefined) runtime.openItemsByOutputIndex.set(outputIndex, entry);
 		if (!runtime.currentBlock) return firstTokenTime;
-		output.content.push(runtime.currentBlock);
 		stream.push({
 			type: getOutputBlockStartEventType(runtime.currentBlock),
-			contentIndex: output.content.length - 1,
+			contentIndex,
 			partial: output,
 		});
 		return firstTokenTime;
@@ -1239,7 +1344,7 @@ function handleCodexStreamEvent(
 
 	if (eventType === "response.function_call_arguments.done") {
 		resetWhitespaceToolCallArgumentsDelta(runtime);
-		handleToolCallArgumentsDone(runtime.currentItem, runtime.currentBlock, rawEvent);
+		handleToolCallArgumentsDone(runtime, rawEvent);
 		return firstTokenTime;
 	}
 
@@ -1251,7 +1356,7 @@ function handleCodexStreamEvent(
 
 	if (eventType === "response.custom_tool_call_input.done") {
 		resetWhitespaceToolCallArgumentsDelta(runtime);
-		handleCustomToolCallInputDone(runtime.currentItem, runtime.currentBlock, rawEvent);
+		handleCustomToolCallInputDone(runtime, rawEvent);
 		return firstTokenTime;
 	}
 
@@ -1413,36 +1518,37 @@ function handleToolCallArgumentsDelta(
 ): CodexWhitespaceToolCallArgumentsDeltaInterruption | undefined {
 	const delta = (rawEvent as { delta?: string }).delta || "";
 	// Observe BEFORE the item/block guard: degenerate whitespace frames can keep
-	// arriving after the item closed (currentBlock detached) and still count as
+	// arriving after the item closed (entry detached) and still count as
 	// progress for the idle watchdogs — dropping them unobserved would reopen
 	// the infinite-loop hole the breaker exists for.
 	const interruption = observeWhitespaceToolCallArgumentsDelta(runtime, rawEvent, delta);
 	if (interruption) return interruption;
-	const currentItem = runtime.currentItem;
-	const currentBlock = runtime.currentBlock;
-	if (currentItem?.type !== "function_call" || currentBlock?.type !== "toolCall") return undefined;
-	currentBlock.partialJson += delta;
-	const throttled = parseStreamingJsonThrottled(currentBlock.partialJson, currentBlock.lastParseLen ?? 0);
+	// Route to the entry the event keys to; a delta whose item already closed
+	// is dropped instead of leaking into a sibling tool call (#2619).
+	const entry = openItemForEvent(runtime, rawEvent);
+	if (!entry) return undefined;
+	if (entry.item.type !== "function_call" || entry.block?.type !== "toolCall") return undefined;
+	const block = entry.block;
+	block.partialJson += delta;
+	const throttled = parseStreamingJsonThrottled(block.partialJson, block.lastParseLen ?? 0);
 	if (throttled) {
-		currentBlock.arguments = throttled.value;
-		currentBlock.lastParseLen = throttled.parsedLen;
+		block.arguments = throttled.value;
+		block.lastParseLen = throttled.parsedLen;
 	}
-	stream.push({ type: "toolcall_delta", contentIndex: output.content.length - 1, delta, partial: output });
+	stream.push({ type: "toolcall_delta", contentIndex: entry.contentIndex, delta, partial: output });
 	return undefined;
 }
 
-function handleToolCallArgumentsDone(
-	currentItem: CodexEventItem | null,
-	currentBlock: CodexOutputBlock | null,
-	rawEvent: Record<string, unknown>,
-): void {
-	if (currentItem?.type !== "function_call" || currentBlock?.type !== "toolCall") return;
+function handleToolCallArgumentsDone(runtime: CodexStreamRuntime, rawEvent: Record<string, unknown>): void {
+	const entry = openItemForEvent(runtime, rawEvent);
+	if (entry?.item.type !== "function_call" || entry.block?.type !== "toolCall") return;
 	const args = (rawEvent as { arguments?: string }).arguments;
 	if (typeof args === "string") {
-		currentBlock.partialJson = args;
-		currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
-		delete (currentBlock as { partialJson?: string }).partialJson;
-		delete (currentBlock as { lastParseLen?: number }).lastParseLen;
+		const block = entry.block;
+		block.partialJson = args;
+		block.arguments = parseStreamingJson(block.partialJson);
+		delete (block as { partialJson?: string }).partialJson;
+		delete (block as { lastParseLen?: number }).lastParseLen;
 	}
 }
 
@@ -1456,25 +1562,23 @@ function handleCustomToolCallInputDelta(
 	// Observe BEFORE the item/block guard — see handleToolCallArgumentsDelta.
 	const interruption = observeWhitespaceToolCallArgumentsDelta(runtime, rawEvent, delta);
 	if (interruption) return interruption;
-	const currentItem = runtime.currentItem;
-	const currentBlock = runtime.currentBlock;
-	if (currentItem?.type !== "custom_tool_call" || currentBlock?.type !== "toolCall") return undefined;
-	currentBlock.partialJson += delta;
-	(currentBlock.arguments as { input?: string }).input = currentBlock.partialJson;
-	stream.push({ type: "toolcall_delta", contentIndex: output.content.length - 1, delta, partial: output });
+	const entry = openItemForEvent(runtime, rawEvent);
+	if (!entry) return undefined;
+	if (entry.item.type !== "custom_tool_call" || entry.block?.type !== "toolCall") return undefined;
+	const block = entry.block;
+	block.partialJson += delta;
+	(block.arguments as { input?: string }).input = block.partialJson;
+	stream.push({ type: "toolcall_delta", contentIndex: entry.contentIndex, delta, partial: output });
 	return undefined;
 }
 
-function handleCustomToolCallInputDone(
-	currentItem: CodexEventItem | null,
-	currentBlock: CodexOutputBlock | null,
-	rawEvent: Record<string, unknown>,
-): void {
-	if (currentItem?.type !== "custom_tool_call" || currentBlock?.type !== "toolCall") return;
+function handleCustomToolCallInputDone(runtime: CodexStreamRuntime, rawEvent: Record<string, unknown>): void {
+	const entry = openItemForEvent(runtime, rawEvent);
+	if (entry?.item.type !== "custom_tool_call" || entry.block?.type !== "toolCall") return;
 	const input = (rawEvent as { input?: string }).input;
 	if (typeof input === "string") {
-		currentBlock.partialJson = input;
-		currentBlock.arguments = { input };
+		entry.block.partialJson = input;
+		entry.block.arguments = { input };
 	}
 }
 
@@ -1490,32 +1594,42 @@ function handleOutputItemDone(
 	const item = structuredCloneJSON(rawItem) as CodexEventItem;
 	runtime.nativeOutputItems.push(item as unknown as Record<string, unknown>);
 
-	if (item.type === "reasoning" && runtime.currentBlock?.type === "thinking") {
-		runtime.currentBlock.thinking = item.summary?.map(summary => summary.text).join("\n\n") || "";
-		runtime.currentBlock.thinkingSignature = JSON.stringify(item);
+	// Match the finalization to the OPEN ITEM that started this block, not the
+	// singleton current — interleaved items can finish out of order, so the
+	// most-recently-added block may belong to a sibling (#2619). Some Codex
+	// function/custom tool items omit `id`; in that case `output_index` still
+	// routes `output_item.done` to the block that received `output_item.added`.
+	const itemId = typeof (item as { id?: string }).id === "string" ? (item as { id: string }).id : "";
+	const entry = (itemId ? runtime.openItems.get(itemId) : null) ?? openItemForEvent(runtime, rawEvent);
+	const block = entry?.block ?? null;
+	const contentIndex = entry?.contentIndex ?? output.content.length - 1;
+
+	if (item.type === "reasoning" && block?.type === "thinking") {
+		block.thinking = item.summary?.map(summary => summary.text).join("\n\n") || "";
+		block.thinkingSignature = JSON.stringify(item);
 		stream.push({
 			type: "thinking_end",
-			contentIndex: output.content.length - 1,
-			content: runtime.currentBlock.thinking,
+			contentIndex,
+			content: block.thinking,
 			partial: output,
 		});
-		runtime.currentBlock = null;
+		closeCodexOpenItem(runtime, entry);
 		return;
 	}
 
-	if (item.type === "message" && runtime.currentBlock?.type === "text") {
-		runtime.currentBlock.text = item.content
+	if (item.type === "message" && block?.type === "text") {
+		block.text = item.content
 			.map(content => (content.type === "output_text" ? content.text : content.refusal))
 			.join("");
 		const phase = item.phase === "commentary" || item.phase === "final_answer" ? item.phase : undefined;
-		runtime.currentBlock.textSignature = encodeTextSignatureV1(item.id, phase);
+		block.textSignature = encodeTextSignatureV1(item.id, phase);
 		stream.push({
 			type: "text_end",
-			contentIndex: output.content.length - 1,
-			content: runtime.currentBlock.text,
+			contentIndex,
+			content: block.text,
 			partial: output,
 		});
-		runtime.currentBlock = null;
+		closeCodexOpenItem(runtime, entry);
 		return;
 	}
 
@@ -1526,26 +1640,25 @@ function handleOutputItemDone(
 			name: item.name,
 			arguments: parseStreamingJson(item.arguments || "{}"),
 		};
-		if (runtime.currentBlock?.type === "toolCall") {
+		if (block?.type === "toolCall") {
 			// Persist the authoritative final args on the stored block; the throttled
-			// delta parser may have left currentBlock.arguments stale (often `{}`).
-			runtime.currentBlock.arguments = toolCall.arguments;
-			delete (runtime.currentBlock as { partialJson?: string }).partialJson;
-			delete (runtime.currentBlock as { lastParseLen?: number }).lastParseLen;
-			// Detach so a late/duplicate arguments.delta cannot append to the
-			// finished block or trip the whitespace-loop guard against it.
-			runtime.currentBlock = null;
+			// delta parser may have left block.arguments stale (often `{}`).
+			block.arguments = toolCall.arguments;
+			delete (block as { partialJson?: string }).partialJson;
+			delete (block as { lastParseLen?: number }).lastParseLen;
 		}
+		// Detach so a late/duplicate arguments.delta cannot append to the
+		// finished block or trip the whitespace-loop guard against it.
+		closeCodexOpenItem(runtime, entry);
 		runtime.canSafelyReplayWebsocketOverSse = false;
-		stream.push({ type: "toolcall_end", contentIndex: output.content.length - 1, toolCall, partial: output });
+		stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 		return;
 	}
 
 	if (item.type === "custom_tool_call") {
-		const rawInput =
-			runtime.currentBlock?.type === "toolCall" && runtime.currentBlock.partialJson
-				? runtime.currentBlock.partialJson
-				: (item.input ?? "");
+		const partial =
+			block?.type === "toolCall" ? (block as ToolCall & { partialJson?: string }).partialJson : undefined;
+		const rawInput = partial && partial.length > 0 ? partial : (item.input ?? "");
 		const toolCall: ToolCall = {
 			type: "toolCall",
 			id: encodeResponsesToolCallId(item.call_id, item.id),
@@ -1553,13 +1666,13 @@ function handleOutputItemDone(
 			arguments: { input: rawInput },
 			customWireName: item.name,
 		};
-		if (runtime.currentBlock?.type === "toolCall") {
-			runtime.currentBlock.arguments = { input: rawInput };
-			delete (runtime.currentBlock as { partialJson?: string }).partialJson;
-			runtime.currentBlock = null;
+		if (block?.type === "toolCall") {
+			block.arguments = { input: rawInput };
+			delete (block as { partialJson?: string }).partialJson;
 		}
+		closeCodexOpenItem(runtime, entry);
 		runtime.canSafelyReplayWebsocketOverSse = false;
-		stream.push({ type: "toolcall_end", contentIndex: output.content.length - 1, toolCall, partial: output });
+		stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 		return;
 	}
 
@@ -1692,8 +1805,7 @@ function dropTrailingDegenerateToolCall(output: AssistantMessage, runtime: Codex
 	if (block && block.type === "toolCall" && output.content[output.content.length - 1] === block) {
 		output.content.pop();
 	}
-	runtime.currentItem = null;
-	runtime.currentBlock = null;
+	closeCodexOpenItem(runtime, runtime.currentEntry);
 }
 
 /**
@@ -1739,10 +1851,8 @@ async function tryRecoverCodexWhitespaceToolCallLoop(
 		transport: runtime.transport,
 	});
 
-	runtime.currentItem = null;
-	runtime.currentBlock = null;
+	resetCodexStreamAccumulators(runtime);
 	runtime.sawTerminalEvent = false;
-	runtime.nativeOutputItems.length = 0;
 	resetWhitespaceToolCallArgumentsDelta(runtime);
 	resetOutputState(context.output);
 	context.firstTokenTime = undefined;
@@ -1799,9 +1909,7 @@ async function tryReconnectCodexWebSocketOnConnectionLimit(
 	if (context.output.content.length > 0) {
 		// Content already emitted to the caller — cannot safely continue on a new WS.
 		// Reset and replay the full request over SSE.
-		runtime.currentItem = null;
-		runtime.currentBlock = null;
-		runtime.nativeOutputItems.length = 0;
+		resetCodexStreamAccumulators(runtime);
 		resetOutputState(context.output);
 		context.firstTokenTime = undefined;
 		recordCodexWebSocketFailure(websocketState, true);
@@ -1814,9 +1922,7 @@ async function tryReconnectCodexWebSocketOnConnectionLimit(
 	// over websocket, bounded by the shared retry budget: an account-scoped
 	// limit can reject every fresh connection, and an unbounded loop would
 	// hammer the endpoint with zero backoff.
-	runtime.currentItem = null;
-	runtime.currentBlock = null;
-	runtime.nativeOutputItems.length = 0;
+	resetCodexStreamAccumulators(runtime);
 	context.firstTokenTime = undefined;
 	if (runtime.websocketStreamRetries >= getCodexWebSocketRetryBudget()) {
 		recordCodexWebSocketFailure(websocketState, true);
@@ -1868,10 +1974,8 @@ async function tryRecoverCodexPreviousResponseNotFound(
 	runtime.providerRetryAttempt += 1;
 	resetCodexWebSocketAppendState(websocketState);
 	resetCodexSessionMetadata(websocketState);
-	runtime.currentItem = null;
-	runtime.currentBlock = null;
+	resetCodexStreamAccumulators(runtime);
 	runtime.sawTerminalEvent = false;
-	runtime.nativeOutputItems.length = 0;
 	resetOutputState(context.output);
 	context.firstTokenTime = undefined;
 
@@ -1918,9 +2022,7 @@ async function tryReplayWebsocketFailureOverSse(
 		// Full re-send on a fresh socket: clear accumulator state from the failed
 		// attempt. Content is empty here, but blockless native items (e.g.
 		// web_search_call) may already have accumulated.
-		runtime.currentItem = null;
-		runtime.currentBlock = null;
-		runtime.nativeOutputItems.length = 0;
+		resetCodexStreamAccumulators(runtime);
 		context.firstTokenTime = undefined;
 		await scheduler.wait(getCodexWebSocketRetryDelayMs(runtime.websocketStreamRetries), {
 			signal: context.requestSetup.requestSignal,
@@ -1929,9 +2031,7 @@ async function tryReplayWebsocketFailureOverSse(
 		return true;
 	}
 
-	runtime.currentItem = null;
-	runtime.currentBlock = null;
-	runtime.nativeOutputItems.length = 0;
+	resetCodexStreamAccumulators(runtime);
 	resetOutputState(context.output);
 	context.firstTokenTime = undefined;
 
@@ -1967,10 +2067,8 @@ async function tryRetryCodexProviderError(
 		transport: runtime.transport,
 	});
 
-	runtime.currentItem = null;
-	runtime.currentBlock = null;
+	resetCodexStreamAccumulators(runtime);
 	runtime.sawTerminalEvent = false;
-	runtime.nativeOutputItems.length = 0;
 	resetOutputState(context.output);
 	context.firstTokenTime = undefined;
 	await scheduler.wait(CODEX_RETRY_DELAY_MS * runtime.providerRetryAttempt, {
@@ -3019,7 +3117,8 @@ async function openCodexSseEventStream(
 	body: RequestBody,
 	state: CodexWebSocketSessionState | undefined,
 	responsesLite: boolean,
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	firstEventTimeoutMs: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
@@ -3031,15 +3130,31 @@ async function openCodexSseEventStream(
 		sentTurnStateHeader: headers.has(X_CODEX_TURN_STATE_HEADER),
 		sentModelsEtagHeader: headers.has(X_MODELS_ETAG_HEADER),
 	});
+	// `wrapCodexSseStream` arms a first-event watchdog only after this fetch
+	// resolves (it wraps the SSE generator). With `timeout: false` disabling
+	// Bun's native 300s ceiling, a stalled pre-response request needs its own
+	// watchdog — combine the caller signal with a fresh
+	// `AbortSignal.timeout(firstEventTimeoutMs)` so headers must arrive
+	// within the configured budget (issue #2422).
+	const preResponseWatchdog =
+		firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0
+			? AbortSignal.timeout(firstEventTimeoutMs)
+			: undefined;
+	const fetchSignal = preResponseWatchdog
+		? signal
+			? AbortSignal.any([signal, preResponseWatchdog])
+			: preResponseWatchdog
+		: signal;
 	const response = await fetchWithRetry(url, {
 		method: "POST",
 		headers,
 		body: JSON.stringify(body),
-		signal,
+		signal: fetchSignal,
 		maxAttempts: CODEX_MAX_RETRIES + 1,
 		defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),
 		maxDelayMs: CODEX_RATE_LIMIT_BUDGET_MS,
 		fetch: fetchOverride,
+		timeout: false,
 	});
 	logCodexDebug("codex response", {
 		url: response.url,

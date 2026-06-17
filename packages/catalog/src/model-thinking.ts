@@ -23,6 +23,7 @@ import {
 import {
 	findThinkingVariantToken,
 	isDeepseekModelIdOrName,
+	isGlm52ReasoningEffortModelId,
 	isMinimaxM2FamilyModelId,
 	isOpenAIGptOssModelId,
 	supportsAdaptiveThinkingDisplay,
@@ -75,6 +76,13 @@ const DEEPSEEK_REASONING_EFFORT_MAP: Readonly<EffortMap> = {
 };
 const FIREWORKS_REASONING_EFFORT_MAP: Readonly<EffortMap> = {
 	[Effort.Minimal]: "none",
+};
+const ZAI_GLM_52_REASONING_EFFORT_MAP: Readonly<EffortMap> = {
+	[Effort.Minimal]: "none",
+	[Effort.Low]: "high",
+	[Effort.Medium]: "high",
+	[Effort.High]: "high",
+	[Effort.XHigh]: "max",
 };
 
 /**
@@ -219,7 +227,7 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
  * through other request fields.
  */
 function omitsWireReasoningEffort(api: Api, compat: CompatOf<Api>): boolean {
-	if (api !== "openai-responses" && api !== "openai-codex-responses") {
+	if (api !== "openai-responses" && api !== "openai-codex-responses" && api !== "azure-openai-responses") {
 		return false;
 	}
 	return (compat as ResolvedOpenAIResponsesCompat | undefined)?.supportsReasoningEffort === false;
@@ -259,9 +267,17 @@ function sameEffortList(left: readonly Effort[], right: readonly Effort[]): bool
 }
 
 function getModelDefinedEfforts<TApi extends Api>(spec: ModelSpec<TApi>): readonly Effort[] | undefined {
+	if (spec.api === "openai-completions" && isZaiGlm52ReasoningEffortModel(spec)) {
+		return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
+	}
 	return spec.api === "openai-completions" && (isMinimaxM2FamilyModelId(spec.id) || isOpenAIGptOssModelId(spec.id))
 		? LOW_MEDIUM_HIGH_REASONING_EFFORTS
 		: undefined;
+}
+
+function isZaiGlm52ReasoningEffortModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
+	if (!isGlm52ReasoningEffortModelId(spec.id)) return false;
+	return modelMatchesHost(spec, "zai") || modelMatchesHost(spec, "zhipu");
 }
 
 function readCompatEffortMap(compat: CompatOf<Api>): EffortMap | undefined {
@@ -287,6 +303,9 @@ function inferDetectedEffortMap<TApi extends Api>(
 	}
 	if (spec.provider === "groq" && spec.id === "qwen/qwen3-32b") {
 		return GROQ_QWEN3_32B_REASONING_EFFORT_MAP;
+	}
+	if (isZaiGlm52ReasoningEffortModel(spec)) {
+		return ZAI_GLM_52_REASONING_EFFORT_MAP;
 	}
 	if (isDeepseekReasoningModel(spec)) {
 		return DEEPSEEK_REASONING_EFFORT_MAP;
@@ -426,7 +445,11 @@ function inferFallbackEfforts<TApi extends Api>(spec: ModelSpec<TApi>, compat: C
 		return DEFAULT_REASONING_EFFORTS;
 	}
 	// OpenAI Responses APIs encode discrete effort levels, including xhigh.
-	if (spec.api === "openai-responses" || spec.api === "openai-codex-responses") {
+	if (
+		spec.api === "openai-responses" ||
+		spec.api === "openai-codex-responses" ||
+		spec.api === "azure-openai-responses"
+	) {
 		return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
 	}
 	return DEFAULT_REASONING_EFFORTS;

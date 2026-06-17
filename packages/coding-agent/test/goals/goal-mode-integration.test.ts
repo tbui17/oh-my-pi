@@ -113,7 +113,12 @@ async function toolNamesFor(harness: GoalHarness): Promise<string[]> {
 }
 
 async function waitForMicrotasks(): Promise<void> {
-	await Bun.sleep(0);
+	// Pure microtask flush — deterministic and fake-timer-safe (no macrotask /
+	// real-clock dependency). Lets queued `.then` callbacks settle so a fired
+	// continuation tick would be observed before we assert it was dropped.
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
 }
 
 async function armInputWaiter(mode: InteractiveMode): Promise<{
@@ -150,6 +155,7 @@ describe("InteractiveMode goal mode integration", () => {
 	});
 
 	afterEach(async () => {
+		vi.useRealTimers();
 		vi.restoreAllMocks();
 		await harness.cleanup();
 	});
@@ -218,6 +224,34 @@ describe("InteractiveMode goal mode integration", () => {
 
 		expect(harness.session.getGoalModeState()?.goal.objective).toBe("Replace the objective");
 		expect(sendGoalModeContext).toHaveBeenCalledWith({ deliverAs: "steer" });
+		expect(waiter.getResolvedText()).toBeUndefined();
+
+		streaming = false;
+		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
+		await waiter.inputPromise;
+	});
+
+	it("drops a goal continuation tick while the agent is streaming", async () => {
+		// Repro for the race the streaming guard on /goal set X exposed: the
+		// 800ms continuation timer armed by getUserInput() can outlive the idle
+		// window when streaming starts between schedule and fire (e.g. /goal set
+		// taking the streaming branch, or any extension that triggers a turn).
+		// Without the streaming-aware guard the timer fires onInputCallback
+		// with a `goal-continuation` and submitInteractiveInput resurfaces
+		// AgentBusyError via promptCustomMessage. Driven with fake timers so the
+		// 800ms window is exercised deterministically without a real wall-clock wait.
+		await harness.mode.handleGoalModeCommand("Ship the release");
+
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+
+		let streaming = true;
+		Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => streaming });
+
+		// Fire the armed 800ms continuation timer while streaming is true.
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+
 		expect(waiter.getResolvedText()).toBeUndefined();
 
 		streaming = false;

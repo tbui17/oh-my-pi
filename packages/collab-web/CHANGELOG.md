@@ -2,7 +2,55 @@
 
 ## [Unreleased]
 
+## [16.0.5] - 2026-06-17
+
+### Fixed
+
+- Preserved assistant soft line breaks and Markdown paragraph/list indentation in the collab web transcript renderer so tree-shaped prose no longer collapses into one paragraph.
+- Changed collab web transcript wrapping to keep Korean/CJK words intact before falling back to emergency breaks for long URLs or identifiers.
+
+## [16.0.3] - 2026-06-16
+
+### Removed
+
+- Removed rendering support for the `render_mermaid` tool from the web tool registry
+
+## [15.13.3] - 2026-06-15
+
+### Fixed
+
+- Wrapped composer button labels to display icon-only on mobile devices for a more compact and readable layout
+- Made the connect screen, ended session card, and notification toasts fully responsive for smaller device viewports
+- Fixed mobile layout issues where the entire chat flow would overflow horizontally and text was rendered too large on iOS Safari (by setting `text-size-adjust: 100%`)
+- Made transcript rows stack vertically on small screens to optimize reading space, and prevented grid track expansion
+- Hid non-essential metadata (such as the model name, thinking level, and working directory path) and context gauge tracks on mobile headers to prevent overflow
+- Fixed mobile layout issues where the entire chat flow would overflow horizontally and text was rendered too large on iOS Safari (by setting `text-size-adjust: 100%`)
+- Made transcript rows stack vertically on small screens to optimize reading space, and prevented grid track expansion
+- Hid non-essential metadata (such as the model name, thinking level, and working directory path) and context gauge tracks on mobile headers to prevent overflow
+- Wrapped composer button labels to display icon-only on mobile devices for a more compact and readable layout
+- Made the connect screen, ended session card, and notification toasts fully responsive for smaller device viewports
+- Fixed mobile layout issues where the entire chat flow would overflow horizontally and text was rendered too large on iOS Safari (by setting `text-size-adjust: 100%`)
+- Made transcript rows stack vertically on small screens to optimize reading space, and prevented grid track expansion
+- Hid non-essential metadata (such as the model name, thinking level, and working directory path) and context gauge tracks on mobile headers to prevent overflow
+- Wrapped composer button labels to display icon-only on mobile devices for a more compact and readable layout
+- Made the connect screen, ended session card, and notification toasts fully responsive for smaller device viewports
+
+## [15.13.1] - 2026-06-15
+
+### Added
+
+- Added `16px` font-size overrides for all text inputs and textareas on mobile viewports to prevent iOS Safari from automatically zooming in the page on focus
+- Added top and bottom safe-area padding (`env(safe-area-inset-*)`) to the header bar, connection card, and composer to prevent them from being covered by notches/home indicators
+- Added translucent click-outside-to-close backdrops for the mobile side rail and agent details drawer to match native mobile chat applications
+- Disabled vertical bounce reload gesture (`overscroll-behavior-y: none`) on the page body to prevent accidental pull-to-refresh page reloads during scrolling
+- Applied global touch responsiveness updates (`touch-action: manipulation` and tap-highlight removals) to links and buttons to improve mobile responsiveness
+
+### Fixed
+
+- Pinned the app shell grid to a single `minmax(0, 1fr)` column so a long session title can no longer set a min-content floor that pushes the header, transcript, and composer wider than narrow or in-app mobile viewports; the title now ellipsizes instead of clipping every row's right edge
+
 ## [15.12.4] - 2026-06-13
+
 ### Fixed
 
 - Fixed context usage percentage calculations to return null when context window is missing or non-positive, preventing invalid or Infinity/NaN usage display
@@ -34,6 +82,7 @@
 - Transcript tool cards now use the per-tool renderers instead of the generic args/result JSON dump — structured summaries in the collapsed header and tool-specific bodies (commands, diffs, todo boards, result images) when expanded
 
 ## [15.11.8] - 2026-06-12
+
 ### Added
 
 - Added deep-link auto-connection support from `#<roomId>#<key>` URLs when opening the web app

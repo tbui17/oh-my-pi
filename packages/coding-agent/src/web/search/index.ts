@@ -8,6 +8,7 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { z } from "zod/v4";
+import { settings } from "../../config/settings";
 import type { CustomTool, CustomToolContext, RenderResultOptions } from "../../extensibility/custom-tools/types";
 import type { Theme } from "../../modes/theme/theme";
 import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { type: "text" };
@@ -115,6 +116,15 @@ function formatForLLM(response: SearchResponse): string {
 	return parts.join("\n");
 }
 
+function hasRenderableSearchContent(response: SearchResponse): boolean {
+	if (response.answer?.trim()) return true;
+	if (response.sources.length > 0) return true;
+	if (response.citations?.length) return true;
+	if (response.relatedQuestions?.some(question => question.trim())) return true;
+	if (response.searchQueries?.some(query => query.trim())) return true;
+	return false;
+}
+
 interface ExecuteSearchOptions {
 	authStorage: AuthStorage;
 	sessionId?: string;
@@ -144,6 +154,16 @@ async function executeSearch(
 		};
 	}
 
+	// Invariant across providers; read once and tolerate an uninitialized
+	// Settings singleton (e.g. `omp q ...` CLI path, unit tests) so the
+	// provider-fallback loop never aborts before any provider runs.
+	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
+	try {
+		antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
+	} catch {
+		antigravityEndpointMode = undefined;
+	}
+
 	const failures: Array<{ provider: SearchProvider; error: unknown }> = [];
 	let lastProvider = providers[0];
 	for (const provider of providers) {
@@ -160,7 +180,12 @@ async function executeSearch(
 				signal,
 				authStorage,
 				sessionId,
+				antigravityEndpointMode,
 			});
+
+			if (!hasRenderableSearchContent(response)) {
+				throw new SearchProviderError(provider.id, `${provider.label} returned no renderable search content.`, 204);
+			}
 
 			const text = formatForLLM(response);
 
@@ -287,6 +312,6 @@ export function getSearchTools(): CustomTool<any, any>[] {
 	return [webSearchCustomTool];
 }
 
-export { getSearchProvider, setPreferredSearchProvider } from "./provider";
+export { getSearchProvider, setExcludedSearchProviders, setPreferredSearchProvider } from "./provider";
 export type { SearchProviderId as SearchProvider, SearchResponse } from "./types";
-export { isSearchProviderPreference } from "./types";
+export { isSearchProviderId, isSearchProviderPreference } from "./types";

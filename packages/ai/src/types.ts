@@ -374,6 +374,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * or the catalog entry already names the variant).
 	 */
 	openrouterVariant?: string;
+	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
+	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 }
 
 // Generic StreamFunction with typed options
@@ -427,6 +429,11 @@ export interface ToolCall {
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
 	intent?: string; // Harness-level intent metadata extracted from traced tool arguments
 	/**
+	 * Verbatim in-band syntax block that produced this synthetic `ptc_*` call.
+	 * Present only for owned prompt/tool-call formats; provider-native calls omit it.
+	 */
+	rawBlock?: string;
+	/**
 	 * Original wire-level name when the tool was invoked via OpenAI's custom-tool
 	 * mechanism (e.g., `apply_patch`). Set by `openai-responses` on receive so
 	 * the history-replay path can re-emit the call as `custom_tool_call` with
@@ -471,12 +478,19 @@ export interface DeveloperMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+export interface ContextSnapshot {
+	promptTokens: number; // authoritative provider prompt/input tokens
+	nonMessageTokens: number; // estimated non-message total at send time
+	lastMessageTimestamp?: number;
+}
+
 export interface AssistantMessage {
 	role: "assistant";
 	content: (TextContent | ThinkingContent | RedactedThinkingContent | ToolCall)[];
 	api: Api;
 	provider: Provider;
 	model: string;
+	contextSnapshot?: ContextSnapshot;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	/**
 	 * Name of the upstream provider an aggregator routed this request to, as
@@ -582,6 +596,24 @@ export type TSchema = ZodType | TJsonSchema;
 /** Resolve parameter types for tool execution / handlers. */
 export type Static<S> = S extends ZodType ? z.infer<S> : S extends { static: infer T } ? T : unknown;
 
+export interface ToolCallExample<TArgs = Record<string, unknown>> {
+	caption?: string;
+	call: TArgs;
+}
+export interface ToolCompareExample<TArgs = Record<string, unknown>> {
+	caption?: string;
+	bad: TArgs;
+	good: TArgs;
+}
+export interface ToolNoteExample {
+	caption: string;
+	note?: string;
+}
+export type ToolExample<TArgs = Record<string, unknown>> =
+	| ToolCallExample<TArgs>
+	| ToolCompareExample<TArgs>
+	| ToolNoteExample;
+
 export interface Tool<TParameters extends TSchema = TSchema> {
 	name: string;
 	description: string;
@@ -605,6 +637,15 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	 * calls route correctly. Absent for regular JSON function tools.
 	 */
 	customWireName?: string;
+	/**
+	 * Illustrative calls/notes; the AI layer renders them into an `<examples>`
+	 * block in the model's native tool-call syntax and appends to the wire
+	 * description. Author `call`/`bad`/`good` as plain argument objects WITHOUT
+	 * `_i` — when intent tracing injects `_i` into the schema, the renderer adds
+	 * a placeholder `_i` automatically. Type each tool's `examples` against its
+	 * own schema (e.g. `readonly ToolExample<z.input<typeof schema>>[]`).
+	 */
+	examples?: readonly ToolExample[];
 }
 
 export interface Context {

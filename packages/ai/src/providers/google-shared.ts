@@ -609,7 +609,7 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 		const candidate = chunk.candidates?.[0];
 		if (candidate?.content?.parts) {
 			for (const part of candidate.content.parts) {
-				if (part.text !== undefined) {
+				if (part.text !== undefined && part.text !== "") {
 					if (!firstTokenSeen) {
 						firstTokenSeen = true;
 						onFirstToken?.();
@@ -649,6 +649,18 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 							delta: part.text,
 							partial: output,
 						});
+					}
+				} else if (part.text === "" && part.thoughtSignature && currentBlock && !part.functionCall) {
+					if (currentBlock.type === "thinking") {
+						currentBlock.thinkingSignature = retainThoughtSignature(
+							currentBlock.thinkingSignature,
+							part.thoughtSignature,
+						);
+					} else if (retainTextSignature) {
+						currentBlock.textSignature = retainThoughtSignature(
+							currentBlock.textSignature,
+							part.thoughtSignature,
+						);
 					}
 				}
 
@@ -781,9 +793,12 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 	if (context.tools && context.tools.length > 0 && options.toolChoice) {
 		const choice = options.toolChoice;
 		if (typeof choice === "string") {
-			config.toolConfig = {
-				functionCallingConfig: { mode: mapToolChoice(choice) },
-			};
+			const mode = mapToolChoice(choice);
+			if (mode !== "AUTO") {
+				config.toolConfig = {
+					functionCallingConfig: { mode },
+				};
+			}
 		} else {
 			// Named-tool routing — `mode: "ANY"` plus an explicit allow-list. The
 			// caller is responsible for ensuring the names exist in `context.tools`.

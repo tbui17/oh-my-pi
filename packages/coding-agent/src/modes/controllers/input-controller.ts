@@ -44,26 +44,9 @@ function hasPasteText(value: unknown): value is PasteTarget {
 	return typeof value === "object" && value !== null && typeof (value as PasteTarget).pasteText === "function";
 }
 
-/** Wrap pasted text in a fenced code block, using a backtick fence longer than any run of
- *  backticks already in the content so an embedded fence cannot terminate the block early. */
-function wrapPasteInCodeBlock(content: string): string {
-	let longestRun = 0;
-	let run = 0;
-	for (let i = 0; i < content.length; i++) {
-		if (content.charCodeAt(i) === 96 /* backtick */) {
-			run++;
-			if (run > longestRun) longestRun = run;
-		} else {
-			run = 0;
-		}
-	}
-	const fence = "`".repeat(Math.max(3, longestRun + 1));
-	return `${fence}\n${content}\n${fence}`;
-}
-
-/** Wrap pasted text in `<pasted_text>` tags so the model treats it as one quoted block. */
-function wrapPasteInXml(content: string): string {
-	return `<pasted_text>\n${content}\n</pasted_text>`;
+/** Wrap pasted text in `<attachment>` tags so the model treats it as one quoted block. */
+function wrapPasteInAttachmentBlock(content: string): string {
+	return `<attachment>\n${content}\n</attachment>`;
 }
 
 const TINY_TITLE_PROGRESS_DONE_TTL_MS = 3_000;
@@ -99,8 +82,8 @@ export class InputController {
 	// (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
 	// #detectLeftDoubleTap.
 	#leftTapCount = 0;
-	// Sequential index for `local://attachment-N` references created by the large-paste "attach as
-	// file" action. Seeded from 0 and bumped past any existing attachment files in #attachPasteAsFile.
+	// Sequential index for `local://attachment-N` references created by the large-paste local-file
+	// action. Seeded from 0 and bumped past any existing attachment files in #attachPasteAsFile.
 	#attachmentCounter = 0;
 
 	#showTinyTitleDownloadProgress(modelKey: string): void {
@@ -347,6 +330,12 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.stt.toggle")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleSTTToggle());
 		}
+		// Hold the space bar to push-to-talk: the editor recognizes the auto-repeat burst, tracks
+		// the spam back out, and toggles STT on hold start / release. Gated on `stt.enabled` so a
+		// disabled STT leaves the space bar typing normally.
+		this.ctx.editor.sttHoldEnabled = () => settings.get("stt.enabled");
+		this.ctx.editor.onSpaceHoldStart = () => void this.ctx.handleSTTToggle();
+		this.ctx.editor.onSpaceHoldEnd = () => void this.ctx.handleSTTToggle();
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
 		}
@@ -494,6 +483,7 @@ export class InputController {
 						cancelled: false,
 						started: true,
 						synthetic: true,
+						userInitiated: true,
 					});
 				}
 				return;
@@ -700,11 +690,17 @@ export class InputController {
 				this.ctx.pendingImages = [];
 				this.ctx.pendingImageLinks = [];
 
-				// Render user message immediately, then let session events catch up
+				// Render user message immediately, then let session events catch up.
+				// Tag the submission as "steer": this is a normal Enter the controller
+				// believed was idle, but a background turn can start in the gap before
+				// `submitInteractiveInput` dispatches it. Steering matches the
+				// streaming-branch Enter (above) and keeps the message from throwing
+				// AgentBusyError on that race.
 				const submission = this.ctx.startPendingSubmission({
 					text,
 					images,
 					imageLinks: inputImageLinks,
+					streamingBehavior: "steer",
 				});
 
 				this.ctx.onInputCallback(submission);
@@ -712,21 +708,25 @@ export class InputController {
 				// No input waiter: the main loop is between turns (post-turn
 				// epilogue, retry backoff, or a scheduled continue) with the agent
 				// momentarily idle. The editor already cleared itself on Enter, so
-				// falling through here would silently swallow the message. Queue it
-				// as a steer instead: the idle drain in #queueSteer delivers it
-				// immediately when the session is resumable, and a retry/continue
-				// run picks it up at loop start otherwise.
+				// falling through here would silently swallow the message. Submit a
+				// real prompt directly; if a background turn starts in the gap,
+				// `streamingBehavior: "steer"` preserves the typed-message queueing
+				// semantics instead of throwing AgentBusyError.
 				this.ctx.editor.imageLinks = undefined;
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 				this.ctx.pendingImages = [];
 				this.ctx.pendingImageLinks = [];
 				try {
-					await this.ctx.withLocalSubmission(text, () => this.ctx.session.steer(text, images), {
-						imageCount: images?.length ?? 0,
-					});
+					await this.ctx.withLocalSubmission(
+						text,
+						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
+						{
+							imageCount: images?.length ?? 0,
+						},
+					);
 				} catch (error) {
 					// Don't lose the message: hand the text and images back to the
-					// editor so the user can retry (e.g. steer() rejecting an
+					// editor so the user can retry (e.g. prompt dispatch rejecting an
 					// extension command).
 					this.ctx.editor.setText(text);
 					if (images && images.length > 0) {
@@ -779,24 +779,35 @@ export class InputController {
 	}
 
 	handleCtrlC(): void {
-		const now = Date.now();
-		if (now - this.ctx.lastSigintTime < 500) {
-			void this.ctx.shutdown();
-		} else {
-			this.ctx.clearEditor();
-			this.ctx.lastSigintTime = now;
-		}
 		// Sync-flush the session JSONL so in-flight writes survive a hard exit.
 		// The TUI consumes Ctrl+C as a key event in raw mode, so postmortem's
-		// process-level SIGINT handler never fires. The second press still
-		// funnels through shutdown() which awaits its own async flush — the
-		// sync flush here is a superset that also covers the first-press case.
+		// process-level SIGINT handler never fires. shutdown() awaits its own
+		// async flush — this sync pass is a superset that also covers the
+		// first-press case and the hard-abort path below.
 		try {
 			this.ctx.sessionManager.flushSync();
 		} catch (err) {
 			logger.warn("session-manager sync flush on Ctrl+C failed", {
 				error: err instanceof Error ? err.message : String(err),
 			});
+		}
+
+		// Hard-abort: a Ctrl+C arriving while shutdown() is already running
+		// means the user has waited long enough for whatever teardown step is
+		// stuck (typically an extension's session_shutdown handler hanging on
+		// IPC). The 2s session_shutdown cap (see runner.ts) already bounds the
+		// common case; this is the defense-in-depth ladder for everything
+		// else. See issue #2600.
+		if (this.ctx.isShuttingDown) {
+			process.exit(130); // 128 + SIGINT
+		}
+
+		const now = Date.now();
+		if (now - this.ctx.lastSigintTime < 500) {
+			void this.ctx.shutdown();
+		} else {
+			this.ctx.clearEditor();
+			this.ctx.lastSigintTime = now;
 		}
 	}
 
@@ -987,7 +998,9 @@ export class InputController {
 
 	restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
 		this.ctx.locallySubmittedUserSignatures.clear();
-		const { steering, followUp } = this.ctx.session.clearQueue();
+		// On Esc (abort) drop non-user internal steers so the post-abort drain can't
+		// auto-resume; plain Alt+Up dequeue preserves them for the continuing stream.
+		const { steering, followUp } = this.ctx.session.clearQueue({ forInterrupt: options?.abort });
 		// Messages typed while compacting live in `compactionQueuedMessages`, not the
 		// agent queue `clearQueue()` drains — but the pending bar shows the same
 		// "Alt+Up to edit" hint for them (ui-helpers `updatePendingMessagesDisplay`).
@@ -1110,6 +1123,35 @@ export class InputController {
 		return true;
 	}
 
+	/**
+	 * Win+Shift+S on Windows 11 leaves the screenshot bitmap on the clipboard
+	 * while the terminal pastes a transient packaged-app TempState path
+	 * (…\MicrosoftWindows.Client.Core_*\TempState\…) that is already gone — or
+	 * never materialized — by the time we read it. Whenever a pasted image path
+	 * can't be turned into an image locally, those clipboard bytes are the real
+	 * payload, so prefer them before degrading to a text paste.
+	 *
+	 * Skipped over SSH: the clipboard read would hit the remote host, not the
+	 * terminal that holds the screenshot. Returns true when the clipboard owned
+	 * the outcome (image attached, or an unsupported-format status surfaced), so
+	 * the caller stops without emitting its own degraded diagnostic.
+	 */
+	async #tryPasteClipboardImage(): Promise<boolean> {
+		const env = process.env;
+		if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) return false;
+		try {
+			const image = await this.clipboard.readImage();
+			if (!image) return false;
+			await this.#normalizeAndInsertPastedImage(
+				{ type: "image", data: image.data.toBase64(), mimeType: image.mimeType },
+				`Unsupported clipboard image format: ${image.mimeType}`,
+			);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	async handleImagePathPaste(path: string): Promise<void> {
 		try {
 			const image = await loadImageInput({
@@ -1118,6 +1160,9 @@ export class InputController {
 				autoResize: false,
 			});
 			if (!image) {
+				// Path resolved but is not a readable image (e.g. a zero-byte or
+				// locked transient screenshot file). Prefer the clipboard bytes.
+				if (await this.#tryPasteClipboardImage()) return;
 				this.ctx.editor.pasteText(path);
 				this.ctx.ui.requestRender();
 				this.ctx.showStatus("Pasted path is not a supported image");
@@ -1136,13 +1181,17 @@ export class InputController {
 			}
 			if (isEnoent(error)) {
 				// #2375: the bracketed paste forwarded by a local terminal carries a
-				// path on the *local* filesystem. When omp itself runs over SSH, that
-				// path is unreachable here; pasting it as text would look like the
-				// image was attached when in fact nothing was sent. Refuse the silent
-				// degrade and tell the user how to send the bytes for real. The
-				// pasted path is untrusted terminal input — strip control/ANSI/
-				// newlines, collapse home to `~`, and bound the displayed length
-				// before splicing it into the status string.
+				// path on the *local* filesystem. The bytes may still be on the
+				// clipboard (Win+Shift+S), so try those before giving up.
+				if (await this.#tryPasteClipboardImage()) return;
+				// Over SSH the clipboard lives on the remote host, so the path is
+				// genuinely unreachable; pasting it as text would look like the
+				// image was attached when nothing was sent. Surface an SSH-aware
+				// diagnostic instead. The pasted path is untrusted terminal input —
+				// strip control/ANSI/newlines, collapse home to `~`, and bound the
+				// displayed length before splicing it into the status string.
+				const env = process.env;
+				const overSsh = Boolean(env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT);
 				const displayPath = truncateToWidth(
 					shortenPath(
 						sanitizeText(path)
@@ -1151,8 +1200,6 @@ export class InputController {
 					),
 					TRUNCATE_LENGTHS.CONTENT,
 				);
-				const env = process.env;
-				const overSsh = Boolean(env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT);
 				this.ctx.showStatus(
 					overSsh
 						? `Image not found at ${displayPath}. Over SSH this path is local to your terminal — paste the image directly (clipboard image-paste shortcut) to send its bytes.`
@@ -1160,6 +1207,7 @@ export class InputController {
 				);
 				return;
 			}
+			if (await this.#tryPasteClipboardImage()) return;
 			this.ctx.editor.pasteText(path);
 			this.ctx.ui.requestRender();
 			this.ctx.showStatus("Failed to read pasted image path");
@@ -1230,24 +1278,24 @@ export class InputController {
 	}
 
 	/**
-	 * Present the large-paste menu and apply the chosen action: wrap in a code block or in XML tags
-	 * (both collapse to a `[Paste]` marker that expands on submit), or save the text to a file and
-	 * reference its path so the agent can `read` it on demand. Cancelling (Esc) falls back to the
-	 * default inline paste marker, so the pasted content is never lost.
+	 * Present the large-paste menu and apply the chosen action: wrap in `<attachment>` tags (collapsed
+	 * to a `[Paste]` marker that expands on submit), save the text to a file and reference its path so
+	 * the agent can `read` it on demand, or paste inline. Cancelling (Esc) falls back to the default
+	 * inline paste marker, so the pasted content is never lost.
 	 */
 	async presentLargePasteMenu(text: string, lineCount: number): Promise<void> {
-		const CODE_BLOCK = "Wrap in a code block";
-		const XML = "Wrap in XML tags";
-		const FILE = "Attach as a file";
+		const WRAPPED_BLOCK = "Attach as a wrapped block";
+		const LOCAL_FILE = "Attach as local file";
+		const INLINE = "Paste inline";
 
 		let choice: string | undefined;
 		try {
 			choice = await this.ctx.showHookSelector(
 				`Pasted ${lineCount} lines`,
 				[
-					{ label: CODE_BLOCK, description: "Fence the text in a ``` block, collapsed to a marker" },
-					{ label: XML, description: "Wrap the text in <pasted_text> tags, collapsed to a marker" },
-					{ label: FILE, description: "Save the text to a file and reference its path" },
+					{ label: WRAPPED_BLOCK, description: "Wrap the text in <attachment> tags, collapsed to a marker" },
+					{ label: LOCAL_FILE, description: "Save the text to a local://attachment file" },
+					{ label: INLINE, description: "Collapse the text to an inline paste marker" },
 				],
 				{ helpText: "Esc to paste inline" },
 			);
@@ -1257,14 +1305,14 @@ export class InputController {
 		}
 
 		switch (choice) {
-			case CODE_BLOCK:
-				this.ctx.editor.insertPaste(wrapPasteInCodeBlock(text));
+			case WRAPPED_BLOCK:
+				this.ctx.editor.insertPaste(wrapPasteInAttachmentBlock(text));
 				break;
-			case XML:
-				this.ctx.editor.insertPaste(wrapPasteInXml(text));
-				break;
-			case FILE:
+			case LOCAL_FILE:
 				await this.#attachPasteAsFile(text, lineCount);
+				break;
+			case INLINE:
+				this.ctx.editor.insertPaste(text);
 				break;
 			default:
 				// Esc / cancel: keep the original behavior — collapse to an inline paste marker.

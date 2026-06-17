@@ -1,10 +1,13 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
 import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
+import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
+import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
+import { createBackgroundTanDispatchBlock } from "../../modes/components/background-tan-message";
 import { BashExecutionComponent } from "../../modes/components/bash-execution";
 import { BranchSummaryMessageComponent } from "../../modes/components/branch-summary-message";
 import { CollabPromptMessageComponent } from "../../modes/components/collab-prompt-message";
@@ -33,6 +36,7 @@ import { materializeImageReferenceLinksSync } from "../../modes/image-references
 import { theme } from "../../modes/theme/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "../../modes/types";
 import {
+	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
 	isSilentAbort,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
@@ -43,7 +47,7 @@ import {
 import type { SessionContext } from "../../session/session-context";
 import { createIrcMessageCard } from "../../tools/irc";
 import { formatBytes, formatDuration } from "../../tools/render-utils";
-import { hasVisibleThinking } from "../../utils/thinking-display";
+import { canonicalizeMessage } from "../../utils/thinking-display";
 
 type TextBlock = { type: "text"; text: string };
 interface RenderInitialMessagesOptions {
@@ -238,6 +242,17 @@ export class UiHelpers {
 						this.ctx.chatContainer.addChild(card);
 						return [card];
 					}
+					if (message.customType === "advisor") {
+						const details = (message as CustomMessage<AdvisorMessageDetails>).details;
+						this.ctx.chatContainer.addChild(
+							createAdvisorMessageCard(details, () => this.ctx.toolOutputExpanded, theme),
+						);
+						break;
+					}
+					if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {
+						this.ctx.chatContainer.addChild(createBackgroundTanDispatchBlock(message as CustomMessage<unknown>));
+						break;
+					}
 					const handoffComponent = createHandoffSummaryMessageComponent(
 						message as CustomMessage<unknown>,
 						this.ctx.toolOutputExpanded,
@@ -393,8 +408,8 @@ export class UiHelpers {
 				const assistantComponent = lastChild instanceof AssistantMessageComponent ? lastChild : undefined;
 				const hasVisibleAssistantContent = message.content.some(
 					content =>
-						(content.type === "text" && content.text.trim().length > 0) ||
-						(content.type === "thinking" && hasVisibleThinking(content)),
+						(content.type === "text" && canonicalizeMessage(content.text)) ||
+						(content.type === "thinking" && canonicalizeMessage(content.thinking)),
 				);
 				if (hasVisibleAssistantContent) {
 					// Rebuild reconstructs immutable history; seal (not finalize) so the

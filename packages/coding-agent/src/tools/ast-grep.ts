@@ -1,12 +1,13 @@
 import * as path from "node:path";
 import { formatHashlineHeader } from "@oh-my-pi/hashline";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstFindMatch, astGrep } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { z } from "zod/v4";
-import { recordFileSnapshot } from "../edit/file-snapshot-store";
+import { recordFileSnapshot, recordSeenLinesFromBody } from "../edit/file-snapshot-store";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import astGrepDescription from "../prompts/tools/ast-grep.md" with { type: "text" };
@@ -130,6 +131,29 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 	readonly description: string;
 	readonly parameters = astGrepSchema;
 	readonly strict = true;
+
+	readonly examples: readonly ToolExample<z.input<typeof astGrepSchema>>[] = [
+		{
+			caption: "Search TypeScript files under src",
+			call: { pat: "console.log($$$)", paths: ["src/**/*.ts"] },
+		},
+		{
+			caption: "Named imports from a specific package",
+			call: { pat: 'import { $$$IMPORTS } from "react"', paths: ["src/**/*.ts"] },
+		},
+		{
+			caption: "Arrow functions assigned to a const",
+			call: { pat: "const $NAME = ($$$ARGS) => $BODY", paths: ["src/utils/**/*.ts"] },
+		},
+		{
+			caption: "Method call on any object, ignoring method name with `$_`",
+			call: { pat: "logger.$_($$$ARGS)", paths: ["src/**/*.ts"] },
+		},
+		{
+			caption: "Loosest existence check for a symbol in one file",
+			call: { pat: "processItems", paths: ["src/worker.ts"] },
+		},
+	];
 	readonly loadMode = "discoverable";
 
 	constructor(private readonly session: ToolSession) {
@@ -269,6 +293,10 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 						displayOut.push(`  meta: ${serializedMeta}`);
 					}
 					fileMatchCounts.set(relativePath, (fileMatchCounts.get(relativePath) ?? 0) + 1);
+				}
+				if (hashContext?.tag) {
+					const absoluteFilePath = path.resolve(this.session.cwd, relativePath);
+					recordSeenLinesFromBody(this.session, absoluteFilePath, hashContext.tag, modelOut.join("\n"));
 				}
 				return { model: modelOut, display: displayOut };
 			};
