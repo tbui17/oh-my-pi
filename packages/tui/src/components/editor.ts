@@ -2816,7 +2816,6 @@ export class Editor implements Component, Focusable {
 		return this.#autocompleteProvider?.shouldTriggerAutocomplete?.(textBeforeCursor, char) ?? false;
 	}
 
-
 	async #tryTriggerAutocomplete(explicitTab: boolean = false): Promise<void> {
 		if (!this.#autocompleteProvider) return;
 		// Check if we should trigger file completion on Tab
