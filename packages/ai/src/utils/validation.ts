@@ -23,6 +23,7 @@
  * massage shapes the LLM almost got right.
  */
 import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { type Type, type } from "arktype";
 import type { ZodType } from "zod/v4";
 import type { $ZodIssue as ZodIssue } from "zod/v4/core";
 import type { Tool, ToolCall } from "../types";
@@ -32,7 +33,8 @@ import {
 	type JsonSchemaValidationIssue,
 	validateJsonSchemaValue,
 } from "./schema/json-schema-validator";
-import { isZodSchema, zodToWireSchema } from "./schema/wire";
+import { stamp } from "./schema/stamps";
+import { arkToWireSchema, isArkSchema, isZodSchema, zodToWireSchema } from "./schema/wire";
 
 // ============================================================================
 // Type Coercion Utilities
@@ -762,10 +764,13 @@ function normalizeOptionalNullsForSchema(
 		if (!(key in nextValue)) continue;
 		const currentValue = nextValue[key];
 		const isNullish = currentValue === null || currentValue === "null";
+		const isInvalidEmptyString =
+			currentValue === "" && !required.has(key) && !branchMatchesSchema(propertySchema, currentValue);
 
-		// Strip null and the string "null" from optional fields.
-		// The LLM sometimes outputs string "null" to mean "no value".
-		if (isNullish && !required.has(key)) {
+		// Strip null/string "null" from optional fields, and strip empty
+		// strings only when the property schema would reject the explicit value.
+		// LLMs sometimes output these placeholders to mean "no value".
+		if ((isNullish || isInvalidEmptyString) && !required.has(key)) {
 			if (!changed) {
 				nextValue = { ...nextValue };
 				changed = true;
@@ -1139,26 +1144,30 @@ type ValidationContext =
 			json: Record<string, unknown>;
 	  }
 	| {
+			kind: "arktype";
+			ark: Type;
+			json: Record<string, unknown>;
+	  }
+	| {
 			kind: "json";
 			json: Record<string, unknown>;
 	  };
 
 /**
  * Cache the validation context derived from a tool's parameters schema.
- * Keyed by the parameters object identity, which is stable across tool
- * registrations.
+ * Keyed by the parameters object identity (stable across tool registrations),
+ * via {@link stamp} so callable ArkType schemas — and any frozen host — degrade
+ * to recompute-on-call instead of throwing on assignment.
  */
 const kValidationContext = Symbol("ai.validationContext");
-type ParamsWithValidationContext = object & { [kValidationContext]?: ValidationContext };
 function getValidationContext(tool: Tool): ValidationContext {
-	const params = tool.parameters as ParamsWithValidationContext;
-	const existing = params[kValidationContext];
-	if (existing) return existing;
-	const ctx: ValidationContext = isZodSchema(params)
-		? { kind: "zod", zod: params, json: zodToWireSchema(params) }
-		: { kind: "json", json: upgradeJsonSchemaTo202012(params) as Record<string, unknown> };
-	params[kValidationContext] = ctx;
-	return ctx;
+	return stamp(tool.parameters as object, kValidationContext, params =>
+		isArkSchema(params)
+			? { kind: "arktype", ark: params, json: arkToWireSchema(params) }
+			: isZodSchema(params)
+				? { kind: "zod", zod: params, json: zodToWireSchema(params) }
+				: { kind: "json", json: upgradeJsonSchemaTo202012(params) as Record<string, unknown> },
+	);
 }
 
 type ContextValidationResult =
@@ -1211,6 +1220,24 @@ function validateContext(ctx: ValidationContext, value: unknown): ContextValidat
 		};
 	}
 
+	if (ctx.kind === "arktype") {
+		const out = ctx.ark(value);
+		if (!(out instanceof type.errors)) {
+			return { success: true, value: preserveUnknownRootFields(value, out) };
+		}
+		// A `.narrow()`/cross-field failure can have ArkType reject while the wire
+		// JSON (its predicate dropped by the toJsonSchema fallback) accepts — then
+		// there are no json issues to coerce and we fall through to the formatted
+		// error built from ArkType's own messages.
+		const jr = validateJsonSchemaValue(ctx.json, value);
+		const flatIssues = jr.success ? [] : flattenJsonSchemaIssues(jr.issues);
+		return {
+			success: false,
+			flatIssues,
+			messages: out.map(e => `  - ${formatIssuePath(e.path)}: ${e.message}`),
+		};
+	}
+
 	const result = validateJsonSchemaValue(ctx.json, value);
 	if (result.success) return { success: true, value };
 	return {
@@ -1257,7 +1284,8 @@ function truncateArgsForError(value: unknown): unknown {
 /**
  * Validates tool call arguments against the tool's schema (Zod or plain JSON
  * Schema). Applies LLM-quirk coercions (numeric strings, JSON-string
- * containers, null-for-optional, null-for-default) before declaring failure.
+ * containers, null/invalid-empty-string-for-optional, null-for-default) before
+ * declaring failure.
  *
  * @throws Error with a formatted message when validation cannot be reconciled.
  */
@@ -1266,9 +1294,10 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 	const ctx = getValidationContext(tool);
 	const { json } = ctx;
 
-	// Always normalize first — strip null and string "null" from optional
-	// fields and substitute defaults. Handles LLM outputting string "null"
-	// to mean "no value" even when validation would otherwise pass.
+	// Always normalize first — strip null/string "null" from optional fields,
+	// strip optional empty strings only when their property schema rejects the
+	// explicit value, and substitute defaults. Handles LLM outputting
+	// placeholders for "no value" even when validation would otherwise pass.
 	let normalizedArgs: unknown = originalArgs;
 	let changed = false;
 	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);

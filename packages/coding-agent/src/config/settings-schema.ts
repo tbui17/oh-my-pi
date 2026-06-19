@@ -872,7 +872,7 @@ export const SETTINGS_SCHEMA = {
 	// Reasoning and prompts
 	defaultThinkingLevel: {
 		type: "enum",
-		values: [...THINKING_EFFORTS, AUTO_THINKING],
+		values: [...THINKING_EFFORTS, AUTO_THINKING, "max"],
 		default: "high",
 		ui: {
 			tab: "model",
@@ -894,6 +894,28 @@ export const SETTINGS_SCHEMA = {
 			group: "Thinking",
 			label: "Hide Thinking Blocks",
 			description: "Hide thinking blocks in assistant responses",
+		},
+	},
+
+	"model.loopGuard.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Loop Guard",
+			description: "Enable automatic stream loop detection for Gemini and DeepSeek models",
+		},
+	},
+
+	"model.loopGuard.checkAssistantContent": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Loop Guard Scan Prose",
+			description: "Apply loop guard to assistant prose messages in addition to thinking logs",
 		},
 	},
 
@@ -1336,6 +1358,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"startup.showSplash": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Startup & Updates",
+			label: "Show Startup Splash",
+			description:
+				"Show the full animated setup splash on normal interactive startup without rerunning setup. Quiet Startup still suppresses it.",
+		},
+	},
+
 	"startup.setupWizard": {
 		type: "boolean",
 		default: true,
@@ -1482,6 +1516,18 @@ export const SETTINGS_SCHEMA = {
 			group: "Collab",
 			label: "Relay URL",
 			description: "Relay used by /collab (wss://host[:port])",
+		},
+	},
+
+	"collab.webUrl": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Web UI URL",
+			description:
+				"Browser UI used by /collab links; empty derives from collab.relayUrl; explicit http:// is localhost-only",
 		},
 	},
 
@@ -1856,7 +1902,7 @@ export const SETTINGS_SCHEMA = {
 				{ value: "anthropic", label: "Anthropic", description: "Use Anthropic-style in-band tool calls." },
 				{ value: "deepseek", label: "DeepSeek", description: "Use DeepSeek-style in-band tool calls." },
 				{ value: "harmony", label: "Harmony", description: "Use Harmony-style in-band tool calls." },
-				{ value: "pi", label: "Pi", description: "Use the Pi owned dialect." },
+				{ value: "pi", label: "Pi", description: "Use the Pi owned dialect (compact sigil-delimited tool calls)." },
 				{ value: "qwen3", label: "Qwen3", description: "Use the Qwen3 owned dialect." },
 				{ value: "gemini", label: "Gemini", description: "Use the Gemini owned dialect." },
 				{ value: "gemma", label: "Gemma", description: "Use the Gemma owned dialect." },

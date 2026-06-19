@@ -66,6 +66,12 @@ describe("Settings", () => {
 			expect(settings.get("tui.maxInlineImages")).toBe(8);
 		});
 
+		it("keeps the normal startup splash disabled by default", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("startup.showSplash")).toBe(false);
+			expect(getDefault("startup.showSplash")).toBe(false);
+		});
+
 		it("exposes all tool calling mode options", () => {
 			const values = getEnumValues("tools.format");
 			expect(values).toEqual([
@@ -487,6 +493,25 @@ describe("Settings", () => {
 			await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(fs.readFileSync(path.join(agentDir, "last-changelog-version"), "utf8")).toBe("0.41.0");
+		});
+
+		it("migrates from settings.json containing comments", async () => {
+			const jsonPath = path.join(agentDir, "settings.json");
+			await fs.promises.writeFile(
+				jsonPath,
+				`{
+					// This is a comment
+					"display": {
+						/* Multiline comment */
+						"showTokenUsage": true
+					}
+				}`,
+			);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("display.showTokenUsage")).toBe(true);
+			expect(fs.existsSync(jsonPath)).toBe(false);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
 		});
 	});
 });

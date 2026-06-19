@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
+import { type } from "arktype";
 import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
 import { getThemeByName } from "../../modes/theme/theme";
 import { formatSessionHistoryMarkdown } from "../../session/session-history-format";
@@ -11,6 +12,7 @@ import {
 	type AdvisorNote,
 	AdvisorRuntime,
 	type AdvisorRuntimeHost,
+	deriveAdvisorTelemetry,
 	formatAdvisorBatchContent,
 	isAdvisorInterruptImmuneTurnActive,
 	isInterruptingSeverity,
@@ -104,6 +106,32 @@ describe("advisor", () => {
 			yq.enqueue("normal", { note: "b" });
 			expect(scheduled).toBe(1);
 		});
+
+		it("clear(kind) drops only that kind's queued entries", () => {
+			const yq = new YieldQueue({
+				isStreaming: () => false,
+				injectIdle: async () => {},
+				scheduleIdleFlush: () => {},
+			});
+			yq.register<{ note: string }>("advisor", {
+				build: entries => (entries.length === 0 ? null : ({ role: "custom", content: "x" } as AgentMessage)),
+				skipIdleFlush: true,
+			});
+			yq.register<{ note: string }>("normal", {
+				build: entries => (entries.length === 0 ? null : ({ role: "custom", content: "y" } as AgentMessage)),
+			});
+
+			yq.enqueue("advisor", { note: "stale advice" });
+			yq.enqueue("normal", { note: "keep me" });
+			expect(yq.has("advisor")).toBe(true);
+			expect(yq.has("normal")).toBe(true);
+
+			// Conversation-boundary cleanup must drop advisor deliveries without
+			// touching other kinds (IRC asides, async-job/diagnostic deliveries).
+			yq.clear("advisor");
+			expect(yq.has("advisor")).toBe(false);
+			expect(yq.has("normal")).toBe(true);
+		});
 	});
 
 	describe("AdviseTool", () => {
@@ -114,6 +142,16 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenCalledWith("x", "concern");
 			expect(result.details).toEqual({ note: "x", severity: "concern" });
 			expect(result.useless).toBe(true);
+		});
+
+		it("validates parameters using ArkType", () => {
+			const onAdvice = vi.fn();
+			const tool = new AdviseTool(onAdvice);
+			const valid = tool.parameters({ note: "x", severity: "concern" });
+			expect(valid instanceof type.errors).toBe(false);
+
+			const invalid = tool.parameters({ note: 123, severity: "invalid" as any });
+			expect(invalid instanceof type.errors).toBe(true);
 		});
 	});
 
@@ -178,6 +216,37 @@ describe("advisor", () => {
 			expect(content).toContain("second &lt;note&gt; &amp; more");
 			// Exactly one severity attribute (only the blocker note carries one).
 			expect(content.split('severity="').length - 1).toBe(1);
+		});
+	});
+
+	describe("deriveAdvisorTelemetry", () => {
+		it("returns undefined when the primary has no telemetry so the advisor stays a no-op", () => {
+			expect(deriveAdvisorTelemetry(undefined, { id: "s-advisor", name: "Advisor" })).toBeUndefined();
+		});
+
+		it("inherits the primary's usage/cost hooks but restamps identity and clears the conversation", () => {
+			const onChatUsage = vi.fn();
+			const costEstimator = vi.fn();
+			const primary: AgentTelemetryConfig = {
+				agent: { id: "main", name: "Main" },
+				conversationId: "session-1",
+				attributes: { "deployment.id": "prod" },
+				onChatUsage,
+				costEstimator,
+			};
+			const identity = { id: "session-1-advisor", name: "Advisor", description: "anthropic/claude-sonnet-4-5" };
+
+			const derived = deriveAdvisorTelemetry(primary, identity);
+
+			// Usage/cost hooks are inherited so the advisor model's calls report through
+			// the same pipeline as the primary — the whole point of the fix.
+			expect(derived?.onChatUsage).toBe(onChatUsage);
+			expect(derived?.costEstimator).toBe(costEstimator);
+			expect(derived?.attributes).toEqual({ "deployment.id": "prod" });
+			// Advisor identity replaces the primary's so spans are attributable to the advisor.
+			expect(derived?.agent).toEqual(identity);
+			// Conversation cleared so the advisor loop falls back to its own `-advisor` session id.
+			expect(derived?.conversationId).toBeUndefined();
 		});
 	});
 
@@ -615,6 +684,63 @@ describe("advisor", () => {
 
 			expect(promptInputs).toHaveLength(3);
 			expect(runtime.backlog).toBe(0);
+		});
+
+		it("drops the in-flight batch when a reset aborts the advisor prompt", async () => {
+			const promptInputs: string[] = [];
+			const { promise: firstPromptStarted, resolve: startFirstPrompt } = Promise.withResolvers<void>();
+			let rejectInFlight: ((err: unknown) => void) | undefined;
+			let promptCalls = 0;
+			const agent: AdvisorAgent = {
+				prompt: input => {
+					promptInputs.push(input);
+					promptCalls++;
+					if (promptCalls === 1) {
+						const { promise, reject } = Promise.withResolvers<void>();
+						rejectInFlight = reject;
+						startFirstPrompt();
+						return promise;
+					}
+					return Promise.resolve();
+				},
+				// AdvisorRuntime.reset() calls agent.reset() then agent.abort(); the real
+				// Agent.abort rejects the awaited prompt, so model that rejection here.
+				abort: () => rejectInFlight?.(new Error("advisor reset")),
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "old-conversation", timestamp: 1 } as AgentMessage];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+			};
+			const runtime = new AdvisorRuntime(agent, host, 0);
+
+			runtime.onTurnEnd(messages);
+			await firstPromptStarted;
+			expect(promptInputs).toHaveLength(1);
+			expect(promptInputs[0]).toContain("old-conversation");
+
+			// Conversation boundary (/new): transcript replaced and the runtime reset
+			// while the advisor prompt is still in flight. The abort that rejects the
+			// prompt is the reset itself — it must NOT be treated as a transient
+			// failure that requeues and re-sends the stale pre-reset batch.
+			messages.length = 0;
+			messages.push({ role: "user", content: "new-conversation", timestamp: 2 } as AgentMessage);
+			runtime.reset();
+			await Bun.sleep(0);
+			await Bun.sleep(0);
+
+			expect(promptInputs).toHaveLength(1);
+			expect(runtime.backlog).toBe(0);
+
+			// The runtime still works afterward: the next turn replays the new
+			// transcript only, never the dropped pre-reset content.
+			runtime.onTurnEnd(messages);
+			await Bun.sleep(0);
+			expect(promptInputs).toHaveLength(2);
+			expect(promptInputs[1]).toContain("new-conversation");
+			expect(promptInputs[1]).not.toContain("old-conversation");
 		});
 	});
 
