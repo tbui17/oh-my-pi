@@ -12,7 +12,7 @@
  * Options:
  *   --from-step=<step>    Resume from step: backup|fetch|merge|verify|build|summary (default: backup)
  *   --skip-build          Skip the build step
- *   --skip-tests          Skip smoke test (still runs bun install + bun check)
+ *   --skip-tests          Skip omp --version check (still runs bun install + bun check)
  *   --dry-run             Print actions without executing
  *   --tag=<version>       Use a specific tag instead of latest (e.g. --tag=v16.1.0)
  *   --repo=<owner/name>   GitHub repo for gh release view (default: auto-detect from git remote)
@@ -60,7 +60,7 @@ interface ReleaseNotes {
 const stepStatus: { label: string; status: StepResultStatus }[] = [
 	{ label: "bun install", status: "SKIPPED" },
 	{ label: "bun check (lint + typecheck)", status: "SKIPPED" },
-	{ label: "bun test:smoke", status: "SKIPPED" },
+	{ label: "omp --version", status: "SKIPPED" },
 	{ label: "bun build:native", status: "SKIPPED" },
 	{ label: "bun build", status: "SKIPPED" },
 ];
@@ -76,7 +76,7 @@ function printUsage(): void {
 Options:
   --from-step=<step>    Resume from step: backup|fetch|merge|verify|build|summary (default: backup)
   --skip-build          Skip the build step
-  --skip-tests          Skip smoke test (still runs bun install + bun check)
+  --skip-tests          Skip omp --version check (still runs bun install + bun check)
   --dry-run             Print actions without executing
   --tag=<version>       Use a specific tag instead of latest (e.g. --tag=v16.1.0)
   --repo=<owner/name>   GitHub repo for gh release view (default: auto-detect from git remote)`);
@@ -351,7 +351,7 @@ function stepVerify(opts: CliOptions): void {
 	if (opts.dryRun) {
 		console.log("[DRY-RUN] Would run: bun install");
 		console.log("[DRY-RUN] Would run: bun check");
-		if (!opts.skipTests) console.log("[DRY-RUN] Would run: bun run ci:test:smoke");
+		if (!opts.skipTests) console.log("[DRY-RUN] Would run: omp --version");
 		return;
 	}
 	const mergeHead = runGitNoThrow(["rev-parse", "--verify", "MERGE_HEAD"]);
@@ -362,10 +362,10 @@ function stepVerify(opts: CliOptions): void {
 	runCheckedStep("bun install", ["bun", "install"]);
 	runCheckedStep("bun check (lint + typecheck)", ["bun", "check"]);
 	if (opts.skipTests) {
-		setStatus("bun test:smoke", "SKIPPED");
-		console.log("[SKIPPED] bun test:smoke (--skip-tests)");
+		setStatus("omp --version", "SKIPPED");
+		console.log("[SKIPPED] omp --version (--skip-tests)");
 	} else {
-		runCheckedStep("bun test:smoke", ["bun", "run", "ci:test:smoke"]);
+		runCheckedStep("omp --version", ["bun", "packages/coding-agent/src/cli.ts", "--version"]);
 	}
 }
 
