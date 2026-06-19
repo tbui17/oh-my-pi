@@ -9090,7 +9090,10 @@ export class AgentSession {
 		return this.#resolveCompactionModelCandidates(this.model, availableModels);
 	}
 
-	#resolveCompactionModelCandidates(preferredModel: Model | null | undefined, availableModels: Model[]): CompactionModelCandidate[] {
+	#resolveCompactionModelCandidates(
+		preferredModel: Model | null | undefined,
+		availableModels: Model[],
+	): CompactionModelCandidate[] {
 		const candidates: CompactionModelCandidate[] = [];
 		const seen = new Set<string>();
 
@@ -9613,7 +9616,7 @@ export class AgentSession {
 										: "Auto-compaction summarization timed out, not retrying same model",
 									{
 										error: message,
-										model: `${candidate.provider}/${candidate.id}`,
+										model: `${model.provider}/${model.id}`,
 									},
 								);
 								lastError = error;
