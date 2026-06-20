@@ -411,7 +411,7 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 From `settings-schema.ts`:
 
 - `compaction.enabled` = `true`
-- `compaction.strategy` = `"context-full"` (`"handoff"`, `"shake"`, `"snapcompact"`, and `"off"` are also supported)
+- `compaction.strategy` = `"snapcompact"` (`"context-full"`, `"handoff"`, `"shake"`, and `"off"` are also supported)
 - `compaction.model` = `undefined`; when set, it is the preferred compaction model selector and accepts `provider/model`, canonical IDs, or `pi/<role>` aliases
 - `compaction.reserveTokens` = `16384`
 - `compaction.keepRecentTokens` = `20000`
