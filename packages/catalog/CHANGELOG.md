@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Umans GLM 5.2 thinking cycle missing the `xhigh` (max) tier. The Umans `/models/info` endpoint reports reasoning levels `["none", "high", "max"]`, but the `UMANS_REASONING_EFFORT_BY_LEVEL` map had no `max` key, so `"max"` was silently dropped during discovery — leaving only `["high"]` in the cached thinking config and making the cycle show off → auto → high. Added `max: Effort.XHigh` so the top tier is recognized and appears in the cycle.
+
 ## [16.1.11] - 2026-06-21
 
 ### Fixed

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import {
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -144,6 +145,40 @@ describe("umans provider catalog", () => {
 
 		expect(glm?.input).toEqual(["text"]);
 		expect(coder?.input).toEqual(["text", "image"]);
+	});
+
+	it('maps the "max" reasoning level to Effort.XHigh so it appears in the thinking cycle', async () => {
+		const fetchImpl: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					"umans-glm-5.2": {
+						display_name: "Umans GLM 5.2",
+						capabilities: {
+							context_window: 405_504,
+							max_completion_tokens: 131_071,
+							recommended_max_tokens: 131_071,
+							supports_vision: "via-handoff",
+							supports_tools: true,
+							reasoning: {
+								supported: true,
+								can_disable: true,
+								levels: ["none", "high", "max"],
+								default_level: "high",
+							},
+						},
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		const fetchDynamicModels = umansModelManagerOptions({ fetch: fetchImpl }).fetchDynamicModels;
+		if (!fetchDynamicModels) throw new Error("Umans dynamic discovery is not configured");
+
+		const models = await fetchDynamicModels();
+		const glm = models?.find(item => item.id === "umans-glm-5.2");
+
+		expect(glm?.thinking?.efforts).toEqual([Effort.High, Effort.XHigh]);
+		expect(glm?.thinking?.defaultLevel).toBe(Effort.High);
 	});
 
 	it("bundles Umans GLM via-handoff models as text-only", () => {
