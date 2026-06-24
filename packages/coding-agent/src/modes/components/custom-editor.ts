@@ -1,3 +1,4 @@
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { addKeyAliases, canonicalKeyId, Editor, type KeyId, parseKey, parseKittySequence } from "@oh-my-pi/pi-tui";
 import type { AppKeybinding } from "../../config/keybindings";
 import { isSettingsInitialized, settings } from "../../config/settings";
@@ -63,6 +64,9 @@ const BRACKETED_PASTE_END = "\x1b[201~";
 const BRACKETED_IMAGE_PATH_REGEX = /\.(?:png|jpe?g|gif|webp)$/i;
 const BRACKETED_IMAGE_PATH_BOUNDARY_REGEX = /\.(?:png|jpe?g|gif|webp)(?=$|["']?\s)/gi;
 const SHELL_ESCAPED_PATH_CHAR_REGEX = /\\([\\\s'"()[\]{}&;<>|?*!$`])/g;
+const URI_SCHEME_REGEX = /^[a-z][a-z0-9+.-]*:/i;
+const FILE_URI_REGEX = /^file:\/\//i;
+const WINDOWS_DRIVE_PATH_REGEX = /^[a-z]:[\\/]/i;
 
 /** Max gap (ms) between two spaces for the later one to count as OS key auto-repeat rather than a
  *  deliberate press. OS auto-repeat is fast; a deliberate tap (even a fast one) is slower. */
@@ -117,6 +121,12 @@ function normalizePastedImagePath(path: string): string {
 	return unquoted.replace(SHELL_ESCAPED_PATH_CHAR_REGEX, "$1");
 }
 
+function isExplicitPastedImagePath(path: string): boolean {
+	if (WINDOWS_DRIVE_PATH_REGEX.test(path) || FILE_URI_REGEX.test(path)) return true;
+	if (URI_SCHEME_REGEX.test(path)) return false;
+	return path.includes("/") || path.includes("\\");
+}
+
 export function extractBracketedImagePastePaths(data: string): string[] | undefined {
 	if (!data.startsWith(BRACKETED_PASTE_START)) return undefined;
 	const endIndex = data.indexOf(BRACKETED_PASTE_END, BRACKETED_PASTE_START.length);
@@ -138,7 +148,7 @@ export function extractBracketedImagePastePaths(data: string): string[] | undefi
 		if (boundaryEnd === undefined) continue;
 
 		const path = normalizePastedImagePath(pasted.slice(segmentStart, boundaryEnd));
-		if (!path || !BRACKETED_IMAGE_PATH_REGEX.test(path)) return undefined;
+		if (!path || !BRACKETED_IMAGE_PATH_REGEX.test(path) || !isExplicitPastedImagePath(path)) return undefined;
 		paths.push(path);
 
 		segmentStart = boundaryEnd;
@@ -162,6 +172,24 @@ export function extractBracketedImagePastePath(data: string): string | undefined
  */
 export class CustomEditor extends Editor {
 	imageLinks?: readonly (string | undefined)[];
+
+	/** Draft images pasted into the composer, consumed on submit. Co-located with
+	 *  {@link imageLinks} so every piece of draft-image state lives on the editor. */
+	pendingImages: ImageContent[] = [];
+	/** Per-image source links (file:// targets) parallel to {@link pendingImages};
+	 *  `undefined` entries are images without a backing reference yet. */
+	pendingImageLinks: (string | undefined)[] = [];
+
+	/** Clear the composer draft: optionally commit `historyText` to history, then
+	 *  reset the editor text and all pending draft-image state. The shared tail of
+	 *  every "message submitted" path; pass no argument for a plain discard. */
+	clearDraft(historyText?: string): void {
+		if (historyText !== undefined) this.addToHistory(historyText);
+		this.setText("");
+		this.imageLinks = undefined;
+		this.pendingImages = [];
+		this.pendingImageLinks = [];
+	}
 
 	/** Treat image/paste markers as indivisible: a stray backspace deletes the whole token
 	 *  instead of corrupting `[Paste #1, +30 lines]` into plain text. */

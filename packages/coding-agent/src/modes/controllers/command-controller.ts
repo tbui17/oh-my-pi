@@ -217,6 +217,7 @@ export class CommandController {
 		try {
 			const result = await shareSession(this.ctx.session.sessionManager, {
 				serverUrl: this.ctx.settings.get("share.serverUrl"),
+				store: this.ctx.settings.get("share.store"),
 				state: this.ctx.session.state,
 				obfuscator: this.ctx.settings.get("share.redactSecrets") ? this.ctx.session.obfuscator : undefined,
 			});
@@ -1171,6 +1172,11 @@ export class CommandController {
 	}
 
 	async handleHandoffCommand(customInstructions?: string): Promise<void> {
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showWarning("Wait for the current response to finish or abort it before handing off.");
+			return;
+		}
+
 		const entries = this.ctx.sessionManager.getEntries();
 		const messageCount = entries.filter(e => e.type === "message").length;
 

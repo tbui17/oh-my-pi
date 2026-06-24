@@ -122,7 +122,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
 	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
-	shell: ["Bash", "Eval & Python"],
+	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
 		"Available Tools",
 		"Todos",
@@ -1592,6 +1592,30 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"share.store": {
+		type: "enum",
+		values: ["blob", "gist"] as const,
+		default: "blob",
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Share Store",
+			description: "Where /share uploads the encrypted session blob",
+			options: [
+				{
+					value: "blob",
+					label: "Encrypted Blob",
+					description: "Upload to the share server (no GitHub account needed; avoids gist API rate limits)",
+				},
+				{
+					value: "gist",
+					label: "GitHub Gist",
+					description: "Push to a secret gist (needs authenticated gh), falling back to the share server",
+				},
+			],
+		},
+	},
+
 	"share.redactSecrets": {
 		type: "boolean",
 		default: true,
@@ -2715,18 +2739,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	readHashLines: {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "files",
-			group: "Reading",
-			label: "Hash Lines",
-			description:
-				"Include snapshot-tag headers and line numbers in read output for hashline edit mode ([PATH#TAG] plus LINE:content)",
-		},
-	},
-
 	"read.defaultLimit": {
 		type: "number",
 		default: 300,
@@ -2993,7 +3005,7 @@ export const SETTINGS_SCHEMA = {
 		default: true,
 		ui: {
 			tab: "shell",
-			group: "Eval & Python",
+			group: "Eval & Runtimes",
 			label: "Python Eval Backend",
 			description: "Allow the eval tool to dispatch Python cells to the IPython kernel",
 		},
@@ -3004,20 +3016,42 @@ export const SETTINGS_SCHEMA = {
 		default: true,
 		ui: {
 			tab: "shell",
-			group: "Eval & Python",
+			group: "Eval & Runtimes",
 			label: "JavaScript Eval Backend",
 			description: "Allow the eval tool to dispatch JavaScript cells to the in-process runtime",
 		},
 	},
 
-	// Python kernel knobs (consumed by the eval py backend and the /python slash command)
+	"eval.rb": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Ruby Eval Backend",
+			description: "Allow the eval tool to dispatch Ruby cells to the persistent Ruby kernel",
+		},
+	},
+
+	"eval.jl": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Julia Eval Backend",
+			description: "Allow the eval tool to dispatch Julia cells to the persistent Julia kernel",
+		},
+	},
+
+	// Runtime knobs (consumed by eval backends and the /python slash command)
 	"python.kernelMode": {
 		type: "enum",
 		values: ["session", "per-call"] as const,
 		default: "session",
 		ui: {
 			tab: "shell",
-			group: "Eval & Python",
+			group: "Eval & Runtimes",
 			label: "Python Kernel Mode",
 			description: "Keep the IPython kernel alive across eval calls or start fresh each time",
 		},
@@ -3027,10 +3061,32 @@ export const SETTINGS_SCHEMA = {
 		default: "",
 		ui: {
 			tab: "shell",
-			group: "Eval & Python",
+			group: "Eval & Runtimes",
 			label: "Python Interpreter",
 			description:
 				"Optional path to an exact Python executable. When set, automatic Python runtime discovery is skipped.",
+		},
+	},
+	"ruby.interpreter": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Ruby Interpreter",
+			description:
+				"Optional path to an exact Ruby executable. When set, automatic Ruby runtime discovery is skipped.",
+		},
+	},
+	"julia.interpreter": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Julia Interpreter",
+			description:
+				"Optional path to an exact Julia executable. When set, automatic Julia runtime discovery is skipped.",
 		},
 	},
 
@@ -3528,7 +3584,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "Essential Tools Override",
 			description:
-				"Override the always-loaded built-in tools (default: read, bash, edit). Leave empty to use defaults.",
+				"Override the always-loaded built-in tools (default: read, bash, edit, write, find, eval). Leave empty to use defaults.",
 		},
 	},
 
@@ -4435,6 +4491,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"exa.searchDelayMs": {
+		type: "number",
+		default: 1_000,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Exa Search Delay",
+			description: "Minimum delay between Exa web search requests in milliseconds; set 0 to disable pacing",
+		},
+	},
+
 	"exa.enableResearcher": {
 		type: "boolean",
 		default: false,
@@ -4742,6 +4809,7 @@ export interface TtsrSettings {
 export interface ExaSettings {
 	enabled: boolean;
 	enableSearch: boolean;
+	searchDelayMs: number;
 	enableResearcher: boolean;
 	enableWebsets: boolean;
 }

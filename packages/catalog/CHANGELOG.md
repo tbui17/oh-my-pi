@@ -5,6 +5,28 @@
 ### Fixed
 
 - Fixed Umans GLM 5.2 thinking cycle missing the `xhigh` (max) tier. The Umans `/models/info` endpoint reports reasoning levels `["none", "high", "max"]`, but the `UMANS_REASONING_EFFORT_BY_LEVEL` map had no `max` key, so `"max"` was silently dropped during discovery — leaving only `["high"]` in the cached thinking config and making the cycle show off → auto → high. Added `max: Effort.XHigh` so the top tier is recognized and appears in the cycle.
+## [16.1.14] - 2026-06-22
+
+### Added
+
+- Added Sakana AI provider support with Fugu model integration
+- Added Sakana AI/Fugu provider catalog entries with Fugu model discovery and Responses API metadata
+- Added support for "xhigh" reasoning tier across model configurations
+- Added configuration for new models GCP-5.4 Mini, GPT-5.5, and variants
+- Added `devin` variant collapse table to streamline model tiering
+
+### Changed
+
+- Updated reasoning label pattern to include "minimal" and "max" efforts
+- Simplified model identification logic for Devin-powered reasoning models
+- Refactored variant routing to consolidate and standardize tier definitions
+
+## [16.1.13] - 2026-06-22
+
+### Added
+
+- Added support for Devin as a model provider
+- Added capability to fetch dynamic models from the Devin model manager
 
 ## [16.1.11] - 2026-06-21
 

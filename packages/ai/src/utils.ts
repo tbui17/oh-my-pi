@@ -3,7 +3,6 @@ import type { ResponseInput, ResponseInputItem } from "./providers/openai-respon
 import type { CacheRetention, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
 
 type OpenAIResponsesReplayItem = ResponseInput[number];
-const IMAGE_GENERATION_CALL_STATUSES = new Set<string>(["in_progress", "completed", "generating", "failed"]);
 
 export { isRecord } from "@oh-my-pi/pi-utils";
 export function normalizeSystemPrompts(systemPrompt: readonly string[] | string | undefined | null): string[] {
@@ -79,6 +78,7 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 ): OpenAIResponsesReplayItem | undefined {
 	if (item.type === "item_reference") return undefined;
 	if (item.type === "image_generation_call") return sanitizeOpenAIResponsesImageGenerationCallForReplay(item);
+	if (item.type === "reasoning") return sanitizeOpenAIResponsesReasoningItemForReplay(item);
 
 	// providerPayload stores raw output items; replay strips item ids and keeps only normalized call_id.
 	const { id: _id, ...sanitizedItem } = item;
@@ -89,20 +89,31 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	return sanitizedItem as unknown as OpenAIResponsesReplayItem;
 }
 
+function sanitizeOpenAIResponsesReasoningItemForReplay(item: Record<string, unknown>): OpenAIResponsesReplayItem {
+	const sanitizedItem: Record<string, unknown> = { type: "reasoning" };
+	if (Array.isArray(item.summary)) sanitizedItem.summary = item.summary;
+	if (Array.isArray(item.content)) sanitizedItem.content = item.content;
+	if (typeof item.encrypted_content === "string" || item.encrypted_content === null) {
+		sanitizedItem.encrypted_content = item.encrypted_content;
+	}
+	if (item.status === "in_progress" || item.status === "completed" || item.status === "incomplete") {
+		sanitizedItem.status = item.status;
+	}
+	return sanitizedItem as unknown as OpenAIResponsesReplayItem;
+}
+
 function sanitizeOpenAIResponsesImageGenerationCallForReplay(
 	item: Record<string, unknown>,
 ): ResponseInputItem.ImageGenerationCall | undefined {
-	if (typeof item.id !== "string" || !isImageGenerationCallStatus(item.status)) return undefined;
+	if (typeof item.id !== "string" || item.status !== "completed" || typeof item.result !== "string") {
+		return undefined;
+	}
 	return {
 		id: truncateResponseItemId(item.id, "ig"),
 		type: "image_generation_call",
-		status: item.status,
-		result: typeof item.result === "string" ? item.result : null,
+		status: "completed",
+		result: item.result,
 	};
-}
-
-function isImageGenerationCallStatus(status: unknown): status is ResponseInputItem.ImageGenerationCall["status"] {
-	return typeof status === "string" && IMAGE_GENERATION_CALL_STATUSES.has(status);
 }
 
 function normalizeReplayedResponsesHistoryCallId(value: string, normalizedValues: Map<string, string>): string {

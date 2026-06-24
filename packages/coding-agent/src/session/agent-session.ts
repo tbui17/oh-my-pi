@@ -55,8 +55,9 @@ import {
 	effectiveReserveTokens,
 	estimateTokens,
 	generateBranchSummary,
-	generateHandoff,
+	generateHandoffFromContext,
 	prepareCompaction,
+	renderHandoffPrompt,
 	resolveThresholdTokens,
 	type SessionEntry,
 	type SessionMessageEntry,
@@ -103,7 +104,7 @@ import {
 	resolveServiceTier,
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
-import { stripToolDescriptions, toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { THINKING_LOOP_ERROR_MARKER } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -164,12 +165,14 @@ import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { loadCapability } from "../discovery";
 import { expandApplyPatchToEntries, normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
 import { getFileSnapshotStore } from "../edit/file-snapshot-store";
+import { disposeJuliaKernelSessionsByOwner } from "../eval/jl/executor";
 import { namespaceSessionId as namespacePythonSessionId } from "../eval/py";
 import {
 	disposeKernelSessionsByOwner,
 	executePython as executePythonCommand,
 	type PythonResult,
 } from "../eval/py/executor";
+import { disposeRubyKernelSessionsByOwner } from "../eval/rb/executor";
 import { defaultEvalSessionId } from "../eval/session-id";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
 import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
@@ -520,7 +523,7 @@ export interface AgentSessionConfig {
 	obfuscator?: SecretObfuscator;
 	/** Inherited eval executor session id from a parent agent. */
 	parentEvalSessionId?: string;
-	/** Logical owner for retained Python kernels created by this session. */
+	/** Logical owner for retained eval kernels created by this session. */
 	evalKernelOwnerId?: string;
 	/**
 	 * AsyncJobManager that this session installed as the process-global instance.
@@ -1622,6 +1625,7 @@ export class AgentSession {
 					await this.#advisorRuntime.waitForCatchup(30000, threshold, signal);
 				}
 			}
+			await this.#maintainContextMidRun(messages, signal);
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
@@ -1939,6 +1943,7 @@ export class AgentSession {
 			snapshotMessages: () => this.agent.state.messages,
 			enqueueAdvice,
 			maintainContext: incomingTokens => this.#maintainAdvisorContext(incomingTokens),
+			obfuscator: this.#obfuscator,
 		});
 		if (seedToCurrent) {
 			this.#advisorRuntime.seedTo(this.agent.state.messages.length);
@@ -2780,9 +2785,31 @@ export class AgentSession {
 			this.#lastAssistantMessage = undefined;
 			if (!msg) {
 				this.#lastSuccessfulYieldToolCallId = undefined;
+				logger.debug("agent_end maintenance routing", {
+					reason: "no-assistant-message",
+					goalModeEnabled: this.#goalModeState?.enabled === true,
+					goalStatus: this.#goalModeState?.goal.status,
+				});
 				await emitAgentEndNotification();
 				return;
 			}
+
+			const maintenanceRoute = (route: string, extra?: Record<string, unknown>) => {
+				logger.debug("agent_end maintenance routing", {
+					route,
+					stopReason: msg.stopReason,
+					provider: msg.provider,
+					model: msg.model,
+					contentBlocks: msg.content.length,
+					hasToolCalls: msg.content.some(content => content.type === "toolCall"),
+					hasText: msg.content.some(content => content.type === "text"),
+					goalModeEnabled: this.#goalModeState?.enabled === true,
+					goalStatus: this.#goalModeState?.goal.status,
+					successfulYield: this.#assistantEndedWithSuccessfulYield(msg),
+					...extra,
+				});
+			};
+			maintenanceRoute("entered");
 
 			// Invalidate GitHub Copilot credentials on auth failure so stale tokens
 			// aren't reused on the next request
@@ -2797,27 +2824,61 @@ export class AgentSession {
 			if (this.#skipPostTurnMaintenanceAssistantTimestamp === msg.timestamp) {
 				this.#skipPostTurnMaintenanceAssistantTimestamp = undefined;
 				this.#lastSuccessfulYieldToolCallId = undefined;
+				maintenanceRoute("skip-post-turn-maintenance");
 				await emitAgentEndNotification();
 				return;
 			}
 
+			const activeGoal = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
 			if (this.#assistantEndedWithSuccessfulYield(msg)) {
 				this.#lastSuccessfulYieldToolCallId = undefined;
-				if (this.#goalModeState?.enabled && this.#goalModeState.goal.status === "active") {
+				if (activeGoal) {
+					maintenanceRoute("successful-yield-active-goal-checkCompaction");
 					const compactionTask = this.#checkCompaction(msg);
 					this.#trackPostPromptTask(compactionTask);
 					await compactionTask;
+				} else {
+					maintenanceRoute("successful-yield-no-active-goal");
 				}
 				await emitAgentEndNotification();
 				return;
 			}
 			this.#lastSuccessfulYieldToolCallId = undefined;
 
+			// Empty-stop cleanup MUST run before any compaction continuation: an
+			// empty toolUse stop must be stripped from active context + session
+			// history before we schedule another turn, otherwise the next
+			// Anthropic turn carries a tool_use block with no matching
+			// tool_result and corrupts message history. The handler also
+			// schedules its own retry, so a real empty stop never needs the
+			// active-goal threshold pre-empt below.
 			if (await this.#handleEmptyAssistantStop(msg)) {
+				maintenanceRoute("empty-stop-handled");
 				await emitAgentEndNotification();
 				return;
 			}
+
+			let compactionResult = COMPACTION_CHECK_NONE;
+			let checkedCompaction = false;
+			if (activeGoal) {
+				maintenanceRoute("active-goal-pre-empt-checkCompaction");
+				const compactionTask = this.#checkCompaction(msg);
+				this.#trackPostPromptTask(compactionTask);
+				compactionResult = await compactionTask;
+				checkedCompaction = true;
+				if (compactionResult.deferredHandoff || compactionResult.continuationScheduled) {
+					maintenanceRoute("active-goal-pre-empt-continuation-scheduled", {
+						deferredHandoff: compactionResult.deferredHandoff,
+						continuationScheduled: compactionResult.continuationScheduled,
+					});
+					this.#resolveRetry();
+					await emitAgentEndNotification();
+					return;
+				}
+			}
+
 			if (await this.#handleUnexpectedAssistantStop(msg)) {
+				maintenanceRoute("unexpected-stop-handled");
 				await emitAgentEndNotification();
 				return;
 			}
@@ -2857,9 +2918,12 @@ export class AgentSession {
 			}
 			this.#resolveRetry();
 
-			const compactionTask = this.#checkCompaction(msg);
-			this.#trackPostPromptTask(compactionTask);
-			const compactionResult = await compactionTask;
+			if (!checkedCompaction) {
+				maintenanceRoute("bottom-checkCompaction");
+				const compactionTask = this.#checkCompaction(msg);
+				this.#trackPostPromptTask(compactionTask);
+				compactionResult = await compactionTask;
+			}
 			// Check for incomplete todos only after a final assistant stop, not intermediate tool-use turns.
 			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
 			if (hasToolCalls) {
@@ -4179,7 +4243,7 @@ export class AgentSession {
 
 	/**
 	 * Synchronously mark the session as disposing so new work is rejected
-	 * immediately: Python/eval starts throw, queued asides are dropped, and the
+	 * immediately: eval starts throw, queued asides are dropped, and the
 	 * aside provider is detached. Idempotent; `dispose()` runs it first.
 	 *
 	 * Wrappers that await other teardown before delegating to `dispose()` MUST
@@ -4241,13 +4305,13 @@ export class AgentSession {
 				AsyncJobManager.setInstance(undefined);
 			}
 		}
-		const pythonExecutionsSettled = await this.#prepareEvalExecutionsForDispose();
-		if (!pythonExecutionsSettled) {
-			logger.warn(
-				"Detaching retained Python kernel ownership during dispose while Python execution is still active",
-			);
+		const evalExecutionsSettled = await this.#prepareEvalExecutionsForDispose();
+		if (!evalExecutionsSettled) {
+			logger.warn("Detaching retained eval-kernel ownership during dispose while eval execution is still active");
 		}
 		await disposeKernelSessionsByOwner(this.#evalKernelOwnerId);
+		await disposeRubyKernelSessionsByOwner(this.#evalKernelOwnerId);
+		await disposeJuliaKernelSessionsByOwner(this.#evalKernelOwnerId);
 		await shutdownTinyTitleClient();
 		this.#releasePowerAssertion();
 		await this.sessionManager.close();
@@ -8052,27 +8116,60 @@ export class AgentSession {
 				throw new Error(`No API key for ${model.provider}`);
 			}
 
-			const rawHandoffText = await generateHandoff(
-				this.agent.state.messages,
-				model,
-				this.#modelRegistry.resolver(model, this.sessionId),
+			// Build the handoff request through the SAME pipeline a live turn uses
+			// (`runEphemeralTurn` / `/btw` share it) so the oneshot reads the
+			// provider prompt cache the main turn populated instead of cold-missing
+			// the whole prefix: identical system prompt, normalized tools, and
+			// transform-/obfuscation-matched message history via
+			// `convertMessagesToLlm` + `buildSideRequestContext`, plus the live turn's
+			// effective provider cache key with a unique side `sessionId` so
+			// OpenAI/Codex append-only state never mixes with the live turn.
+			const cacheSessionId = this.sessionId;
+			// The loop sends `promptCacheKey` (providerPromptCacheKey) and falls back to
+			// the provider session id; providers route on `promptCacheKey ?? sessionId`.
+			// Both can diverge from this.sessionId (tan/subagent/shared sessions), so
+			// mirror exactly what the live turn populated the cache under.
+			const handoffPromptCacheKey = this.agent.promptCacheKey ?? this.agent.sessionId;
+			const handoffPromptText = renderHandoffPrompt(this.#obfuscateTextForProvider(customInstructions));
+			const handoffSnapshot: AgentMessage[] = [
+				...this.agent.state.messages,
 				{
-					systemPrompt: this.#baseSystemPrompt,
-					tools: this.#pruneToolDescriptions
-						? stripToolDescriptions(this.agent.state.tools)
-						: this.agent.state.tools,
-					customInstructions: this.#obfuscateTextForProvider(customInstructions),
-					convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+					role: "user",
+					content: [{ type: "text", text: handoffPromptText }],
+					attribution: "agent",
+					timestamp: Date.now(),
+				},
+			];
+			const handoffLlmMessages = await this.convertMessagesToLlm(handoffSnapshot, handoffSignal);
+			// Base system prompt, not a per-turn `before_agent_start` hook override —
+			// the handoff seeds a fresh session and must not carry prompt-specific
+			// hook state. Matches the prompt the old handoff path sent.
+			const handoffContext = await this.agent.buildSideRequestContext(handoffLlmMessages, this.#baseSystemPrompt);
+			const handoffStreamOptions = this.prepareSimpleStreamOptions(
+				{
+					apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
+					sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
+					promptCacheKey: handoffPromptCacheKey,
+					preferWebsockets: false,
+					serviceTier: this.#effectiveServiceTier(model),
+					hideThinkingSummary: this.agent.hideThinkingSummary,
 					initiatorOverride: "agent",
-					metadata: this.agent.metadataForProvider(model.provider),
+					signal: handoffSignal,
+				},
+				model.provider,
+			);
+			const rawHandoffText = await generateHandoffFromContext(
+				obfuscateProviderContext(this.#obfuscator, handoffContext),
+				model,
+				{
+					streamOptions: handoffStreamOptions,
 					telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
-					// Honor the user's /model thinking selection on the handoff
-					// path. Clamped per-model inside generateHandoff via
-					// resolveCompactionEffort so unsupported-effort models don't
-					// trip requireSupportedEffort.
+					// Honor the user's /model thinking selection on the handoff path.
+					// Clamped per-model inside generateHandoffFromContext via
+					// resolveCompactionEffort so unsupported-effort models don't trip
+					// requireSupportedEffort.
 					thinkingLevel: this.thinkingLevel,
 				},
-				handoffSignal,
 			);
 			const handoffText = this.#deobfuscateFromProvider(rawHandoffText);
 
@@ -8217,6 +8314,58 @@ export class AgentSession {
 	}
 
 	/**
+	 * Compact active `/goal` runs that never settle to `agent_end`.
+	 *
+	 * Long autonomous goals can keep producing tool calls inside one agent run.
+	 * The post-turn `agent_end` threshold check never fires in that shape, so
+	 * context can grow until provider overflow. `onTurnEnd` is the safe boundary:
+	 * tool results for the just-finished turn are already paired in
+	 * `activeMessages`, the live array the agent loop reads before its next
+	 * model call. Run maintenance here and splice the compacted state back into
+	 * that array, mirroring [`AgentSession.#applyRewind`].
+	 */
+	async #maintainContextMidRun(activeMessages: AgentMessage[], signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted || this.#isDisposed || this.isCompacting || this.isGeneratingHandoff) return;
+		if (!(this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active")) return;
+
+		const model = this.model;
+		const contextWindow = model?.contextWindow ?? 0;
+		if (contextWindow <= 0) return;
+
+		const compactionSettings = this.settings.getGroup("compaction");
+		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
+
+		const lastAssistant = [...activeMessages]
+			.reverse()
+			.find((message): message is AssistantMessage => message.role === "assistant");
+		if (!lastAssistant || lastAssistant.stopReason === "aborted" || lastAssistant.stopReason === "error") return;
+
+		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
+		const storedContextTokens = this.#estimateStoredContextTokens();
+		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
+		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
+
+		const messagesBefore = activeMessages.length;
+		await this.#runAutoCompaction("threshold", false, false, false, {
+			autoContinue: false,
+			suppressContinuation: true,
+			triggerContextTokens: contextTokens,
+		});
+
+		if (signal?.aborted) return;
+		const compactedMessages = this.agent.state.messages;
+		if (compactedMessages !== activeMessages) {
+			activeMessages.splice(0, activeMessages.length, ...compactedMessages);
+		}
+		logger.debug("Mid-run goal compaction ran between tool-call turns", {
+			contextTokens,
+			contextWindow,
+			strategy: compactionSettings.strategy,
+			messagesBefore,
+			messagesAfter: activeMessages.length,
+		});
+	}
+	/**
 	 * Check if context maintenance or promotion is needed and run it.
 	 * Called after agent_end and before prompt submission.
 	 *
@@ -8341,28 +8490,58 @@ export class AgentSession {
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
 		const pruneResult = await this.#pruneToolOutputs();
-		let contextTokens = calculateContextTokens(assistantMessage.usage);
-		if (supersedeResult) {
-			contextTokens = Math.max(0, contextTokens - supersedeResult.tokensSaved);
-		}
-		if (pruneResult) {
-			contextTokens = Math.max(0, contextTokens - pruneResult.tokensSaved);
-		}
-		// Floor by the real stored-conversation estimate so a payload-shrinking
-		// before_provider_request hook (e.g. a compression extension such as
-		// Headroom) can't deflate the provider-reported usage below the true
-		// history size and skip the threshold. The estimate runs after the prune
-		// passes above, so it reflects the post-prune message set.
-		contextTokens = compactionContextTokens(contextTokens, this.#estimateStoredContextTokens());
-		if (shouldCompact(contextTokens, contextWindow, compactionSettings)) {
+		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
+		const assistantUsageContextTokens = calculateContextTokens(assistantMessage.usage);
+		const storedContextTokens = this.#estimateStoredContextTokens();
+		// Pruning frees bytes for the NEXT prompt; it does not change the size of
+		// the prompt the LLM just billed for. Earlier revisions subtracted the
+		// per-turn supersede/prune `tokensSaved` from the threshold input, which
+		// let a long-running `/goal` session sit above `compaction.thresholdTokens`
+		// indefinitely whenever per-turn pruning saved enough to drop the
+		// post-prune estimate below the user-configured trigger — the visible
+		// context (anchored to the same provider billing) still showed >threshold,
+		// but `shouldCompact` no-op'd (#3174). Anchor the initial trigger on the
+		// last turn's billed context tokens, floored by the post-prune
+		// stored-conversation estimate so a payload-compression hook still can't
+		// deflate the trigger.
+		const contextTokens = compactionContextTokens(assistantUsageContextTokens, storedContextTokens);
+		const postMaintenanceContextTokens = compactionContextTokens(
+			Math.max(0, assistantUsageContextTokens - maintenanceTokensFreed),
+			storedContextTokens,
+		);
+		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
+		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
+		logger.debug("Auto-compaction threshold decision", {
+			phase: "post-agent-end",
+			goalModeEnabled: this.#goalModeState?.enabled === true,
+			goalStatus: this.#goalModeState?.goal.status,
+			stopReason: assistantMessage.stopReason,
+			sameModel: sameModel === true,
+			contextWindow,
+			strategy: compactionSettings.strategy,
+			thresholdTokens,
+			assistantUsageContextTokens,
+			storedContextTokens,
+			resolvedContextTokens: contextTokens,
+			postMaintenanceContextTokens,
+			maintenanceTokensFreed,
+			shouldCompact: shouldThresholdCompact,
+			contextPromotionEnabled: this.settings.get("contextPromotion.enabled") === true,
+		});
+		if (shouldThresholdCompact) {
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
 				return await this.#runAutoCompaction("threshold", false, false, allowDefer, {
 					autoContinue,
-					triggerContextTokens: contextTokens,
+					triggerContextTokens: postMaintenanceContextTokens,
 				});
 			}
+			logger.debug("Auto-compaction threshold satisfied but context promotion took over", {
+				contextTokens,
+				contextWindow,
+				model: `${assistantMessage.provider}/${assistantMessage.model}`,
+			});
 		}
 		return COMPACTION_CHECK_NONE;
 	}
@@ -9030,6 +9209,21 @@ export class AgentSession {
 			providerKeys.add(`openai-responses:${nextModel.provider}`);
 		}
 
+		// `openai-completions` sessions are keyed `openai-completions:<provider>:<resolvedBaseUrl>:<modelId>`
+		// and cache backend-specific decisions (strict-tools disable scopes, reasoning-effort
+		// fallbacks). The resolved request base URL can differ from the catalog `model.baseUrl`
+		// (Moonshot env override, Alibaba Coding Plan enterprise URL, Azure deployment URL),
+		// so evict by provider prefix when the user moves away from that completions backend.
+		let completionsPrefixToEvict: string | undefined;
+		if (currentModel.api === "openai-completions") {
+			const currentScope = `${currentModel.provider}:${currentModel.baseUrl ?? ""}`;
+			const nextScope =
+				nextModel.api === "openai-completions" ? `${nextModel.provider}:${nextModel.baseUrl ?? ""}` : undefined;
+			if (currentScope !== nextScope) {
+				completionsPrefixToEvict = `openai-completions:${currentModel.provider}:`;
+			}
+		}
+
 		for (const providerKey of providerKeys) {
 			const state = this.#providerSessionState.get(providerKey);
 			if (!state) continue;
@@ -9044,6 +9238,21 @@ export class AgentSession {
 			}
 
 			this.#providerSessionState.delete(providerKey);
+		}
+
+		if (completionsPrefixToEvict !== undefined) {
+			for (const [key, state] of this.#providerSessionState) {
+				if (!key.startsWith(completionsPrefixToEvict)) continue;
+				try {
+					state.close();
+				} catch (error) {
+					logger.warn("Failed to close provider session state during model switch", {
+						providerKey: key,
+						error: String(error),
+					});
+				}
+				this.#providerSessionState.delete(key);
+			}
 		}
 	}
 
@@ -9482,13 +9691,15 @@ export class AgentSession {
 		willRetry: boolean,
 		deferred = false,
 		allowDefer = true,
-		options: { autoContinue?: boolean; triggerContextTokens?: number } = {},
+		options: { autoContinue?: boolean; triggerContextTokens?: number; suppressContinuation?: boolean } = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.settings.getGroup("compaction");
 		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
 		const generation = this.#promptGeneration;
-		const shouldAutoContinue = options.autoContinue !== false && compactionSettings.autoContinue !== false;
+		const suppressContinuation = options.suppressContinuation === true;
+		const shouldAutoContinue =
+			!suppressContinuation && options.autoContinue !== false && compactionSettings.autoContinue !== false;
 		// Shake runs inline (cheap, no remote LLM). On overflow recovery, if shake
 		// reclaims nothing we fall through to the summary-compaction body below so
 		// the oversized input still gets resolved.
@@ -9499,6 +9710,7 @@ export class AgentSession {
 				generation,
 				shouldAutoContinue,
 				options.triggerContextTokens,
+				suppressContinuation,
 			);
 			if (outcome !== "fallback") return outcome;
 		}
@@ -9952,7 +10164,7 @@ export class AgentSession {
 
 				this.#scheduleAgentContinue({ delayMs: 100, generation });
 				continuationScheduled = true;
-			} else if (this.agent.hasQueuedMessages()) {
+			} else if (!suppressContinuation && this.agent.hasQueuedMessages()) {
 				// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
 				// Kick the loop so queued messages are actually delivered.
 				this.#scheduleAgentContinue({
@@ -10012,6 +10224,7 @@ export class AgentSession {
 		generation: number,
 		autoContinue: boolean,
 		triggerContextTokens?: number,
+		suppressContinuation = false,
 	): Promise<CompactionCheckResult | "fallback"> {
 		const action = "shake";
 		this.#autoCompactionAbortController?.abort();
@@ -10042,15 +10255,16 @@ export class AgentSession {
 			// situation actually resolves; "idle" is exempt because its 60s+ timer
 			// re-checks usage before re-firing and cannot dead-loop on its own.
 			//
-			// #2275: the post-shake check MUST be anchored on the same metric that
-			// triggered compaction. The local estimator (`#estimatePendingPromptTokens`)
-			// undercounts thinking-signature payloads, so on thinking-heavy sessions it
-			// reads well below the provider-reported usage that fired the threshold.
-			// When that estimate slips under the threshold, the fallback never fires
-			// and the auto-continue prompt re-injects every turn. Prefer the trigger's
-			// own `contextTokens` (provider-anchored) when the caller supplies it, and
-			// add hysteresis (80% recovery band) so we don't oscillate at the boundary
-			// while shake keeps reclaiming a trickle of the previous turn's output.
+			// #2275: the post-shake check MUST stay provider-anchored when caller
+			// usage and local estimates diverge. The local estimator undercounts
+			// thinking-signature payloads, so thinking-heavy sessions can read well
+			// below the provider usage that fired the threshold. Prefer the caller's
+			// context figure when supplied, then subtract shake's own savings and add
+			// hysteresis (80% recovery band) so we don't oscillate at the boundary.
+			// Threshold callers pass the provider-billed trigger after accounting for
+			// any supersede/drop-useless pruning that already rewrote the next prompt;
+			// without that pre-shake savings, shake can fall through to context-full
+			// even though the post-prune history is already inside the recovery band.
 			const contextWindow = this.model?.contextWindow ?? 0;
 			const compactionSettings = this.settings.getGroup("compaction");
 			let stillOverThreshold = false;
@@ -10110,7 +10324,7 @@ export class AgentSession {
 				}
 				this.#scheduleAgentContinue({ delayMs: 100, generation });
 				continuationScheduled = true;
-			} else if (this.agent.hasQueuedMessages()) {
+			} else if (!suppressContinuation && this.agent.hasQueuedMessages()) {
 				this.#scheduleAgentContinue({
 					delayMs: 100,
 					generation,
@@ -12198,8 +12412,8 @@ export class AgentSession {
 		pendingMessages?: AgentMessage[];
 	}): ContextUsageBreakdown | undefined {
 		const model = this.model;
-		const contextWindow = options?.contextWindow ?? model?.contextWindow ?? 0;
-		if (!Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
+		const rawContextWindow = options?.contextWindow ?? model?.contextWindow ?? 0;
+		const contextWindow = Number.isFinite(rawContextWindow) && rawContextWindow > 0 ? rawContextWindow : 0;
 
 		const { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens } = computeNonMessageBreakdown(this);
 		const categoryNonMessageTokens = skillsTokens + toolsTokens + systemContextTokens + systemPromptTokens;
