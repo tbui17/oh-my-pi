@@ -1,5 +1,5 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Effort, Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -23,7 +23,12 @@ import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS, MODEL_ROLES } from "../..
 import type { Settings } from "../../config/settings";
 import { type ThemeColor, theme } from "../../modes/theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	parseEffort,
+} from "../../thinking";
 import { getTabBarTheme } from "../shared";
 import { DynamicBorder } from "./dynamic-border";
 
@@ -1045,7 +1050,10 @@ export class ModelSelectorComponent extends Container {
 		}
 	}
 	#getThinkingLevelsForModel(model: Model): ReadonlyArray<ConfiguredThinkingLevel> {
-		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
+		const efforts = getSupportedEfforts(model)
+			.map(parseEffort)
+			.filter((e): e is Effort => e !== undefined);
+		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...efforts];
 	}
 
 	#getCurrentRoleThinkingLevel(role: string): ConfiguredThinkingLevel {
