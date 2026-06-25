@@ -23,6 +23,8 @@ interface BundledModel {
 	thinking?: {
 		defaultLevel?: string;
 		requiresEffort?: boolean;
+		efforts?: string[];
+		effortMap?: Record<string, string>;
 	};
 	compat?: {
 		escapeBuiltinToolNames?: boolean;
@@ -56,6 +58,22 @@ describe("umans provider catalog", () => {
 							supports_vision: true,
 							supports_tools: true,
 							reasoning: { supported: true, can_disable: false, default_level: "medium" },
+						},
+					},
+					"umans-glm-5.2": {
+						display_name: "Umans GLM 5.2",
+						capabilities: {
+							context_window: 405_504,
+							max_completion_tokens: 131_072,
+							recommended_max_tokens: 131_071,
+							supports_vision: "via-handoff",
+							supports_tools: true,
+							reasoning: {
+								supported: true,
+								can_disable: true,
+								levels: ["none", "high", "max"],
+								default_level: "high",
+							},
 						},
 					},
 				}),
@@ -93,6 +111,20 @@ describe("umans provider catalog", () => {
 			thinking: { defaultLevel: "medium", requiresEffort: true },
 			compat: { escapeBuiltinToolNames: true },
 		});
+		const glm52 = models?.find(item => item.id === "umans-glm-5.2");
+		expect(glm52).toMatchObject({
+			id: "umans-glm-5.2",
+			reasoning: true,
+			thinking: {
+				mode: "anthropic-budget-effort",
+				defaultLevel: "high",
+				efforts: ["high", "xhigh"],
+				effortMap: { xhigh: "max" },
+			},
+		});
+		if (!glm52) throw new Error("Umans GLM 5.2 was not discovered");
+		expect(glm52.thinking?.effortMap).toEqual({ [Effort.XHigh]: "max" });
+		expect(glm52.thinking?.defaultLevel).toBe(Effort.High);
 	});
 
 	it("surfaces Umans discovery fetch failures", async () => {
@@ -308,6 +340,18 @@ describe("umans provider catalog", () => {
 		expect(model.compat?.escapeBuiltinToolNames).toBe(true);
 		expect(model.thinking).toMatchObject({
 			requiresEffort: true,
+		});
+	});
+
+	it("bundles Umans GLM 5.2 high/max reasoning metadata with the max wire effort", () => {
+		const providers = modelsJson as Record<string, Record<string, BundledModel>>;
+		const model = providers.umans?.["umans-glm-5.2"];
+
+		expect(model).toBeDefined();
+		expect(model.thinking).toMatchObject({
+			mode: "anthropic-budget-effort",
+			efforts: ["high", "xhigh"],
+			effortMap: { xhigh: "max" },
 		});
 	});
 });
