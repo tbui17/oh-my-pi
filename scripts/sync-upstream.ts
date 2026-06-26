@@ -15,7 +15,6 @@
  *   --skip-tests          Skip omp --version check (still runs bun install + bun check)
  *   --dry-run             Print actions without executing
  *   --tag=<version>       Use a specific tag instead of latest (e.g. --tag=v16.1.0)
- *   --repo=<owner/name>   GitHub repo for gh release view (default: auto-detect from git remote)
  */
 
 import * as path from "node:path";
@@ -31,7 +30,6 @@ interface CliOptions {
 	skipTests: boolean;
 	dryRun: boolean;
 	tag: string | null;
-	repo: string | null;
 }
 
 interface CommandResult {
@@ -48,13 +46,6 @@ interface SyncState {
 	oldBase: string;
 	newMain: string;
 	alreadyUpToDate: boolean;
-}
-
-interface ReleaseNotes {
-	tag: string;
-	found: boolean;
-	publishedAt: string | null;
-	packages: Map<string, Map<string, string[]>>;
 }
 
 const stepStatus: { label: string; status: StepResultStatus }[] = [
@@ -78,8 +69,7 @@ Options:
   --skip-build          Skip the build step
   --skip-tests          Skip omp --version check (still runs bun install + bun check)
   --dry-run             Print actions without executing
-  --tag=<version>       Use a specific tag instead of latest (e.g. --tag=v16.1.0)
-  --repo=<owner/name>   GitHub repo for gh release view (default: auto-detect from git remote)`);
+  --tag=<version>       Use a specific tag instead of latest (e.g. --tag=v16.1.0)`);
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -89,7 +79,6 @@ function parseArgs(argv: string[]): CliOptions {
 		skipTests: false,
 		dryRun: false,
 		tag: null,
-		repo: null,
 	};
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -102,8 +91,6 @@ function parseArgs(argv: string[]): CliOptions {
 		else if (arg.startsWith("--from-step=")) options.fromStep = arg.slice("--from-step=".length) as Step;
 		else if (arg === "--tag") options.tag = next() || null;
 		else if (arg.startsWith("--tag=")) options.tag = arg.slice("--tag=".length);
-		else if (arg === "--repo") options.repo = next() || null;
-		else if (arg.startsWith("--repo=")) options.repo = arg.slice("--repo=".length);
 		else if (arg === "--skip-build") options.skipBuild = true;
 		else if (arg === "--skip-tests") options.skipTests = true;
 		else if (arg === "--dry-run") options.dryRun = true;
@@ -155,34 +142,6 @@ function runStep(name: string, command: string[], opts?: { cwd?: string }): { ex
 	return { exitCode: result.exitCode ?? -1 };
 }
 
-function runGh(args: string[]): CommandResult {
-	try {
-		const result = Bun.spawnSync(["gh", ...args], { cwd: repoRoot, stdout: "pipe", stderr: "pipe" });
-		return {
-			exitCode: result.exitCode ?? -1,
-			stdout: result.stdout?.toString("utf-8") ?? "",
-			stderr: result.stderr?.toString("utf-8") ?? "",
-		};
-	} catch (err) {
-		return { exitCode: -1, stdout: "", stderr: (err as Error)?.message ?? String(err) };
-	}
-}
-
-function parseRepoFromRemote(url: string): string | null {
-	const trimmed = url.trim();
-	const match = trimmed.match(/github\.com[:/]([^/]+)\/(.+)$/i);
-	if (!match) return null;
-	let name = match[2].trim();
-	if (name.endsWith(".git")) name = name.slice(0, -4);
-	return `${match[1]}/${name}`;
-}
-
-function detectRepo(): string | null {
-	const url = runGitNoThrow(["remote", "get-url", "origin"]).stdout;
-	if (!url) return null;
-	return parseRepoFromRemote(url);
-}
-
 function findLatestTag(): string {
 	const out = runGit(["tag", "--sort=-creatordate", "--list", "v*"]);
 	const first = out.split(/\r?\n/)[0]?.trim();
@@ -190,51 +149,6 @@ function findLatestTag(): string {
 		throw new Error("No release tags (v*) found in repository.");
 	}
 	return first;
-}
-
-function parseReleaseBody(body: string): Map<string, Map<string, string[]>> {
-	const packages = new Map<string, Map<string, string[]>>();
-	let currentPkg: string | null = null;
-	let currentCat: string | null = null;
-	for (const rawLine of body.split(/\r?\n/)) {
-		const line = rawLine.trimEnd();
-		if (line.startsWith("## @oh-my-pi/")) {
-			currentPkg = line.slice(3).trim();
-			if (!packages.has(currentPkg)) packages.set(currentPkg, new Map());
-			currentCat = null;
-		} else if (line.startsWith("### ")) {
-			currentCat = line.slice(4).trim();
-			if (currentPkg && currentCat) {
-				const pkg = packages.get(currentPkg);
-				if (pkg && !pkg.has(currentCat)) pkg.set(currentCat, []);
-			}
-		} else if (line.startsWith("- ")) {
-			const bullet = line.slice(2).trim();
-			if (currentPkg && currentCat) {
-				const condensed = bullet.length > 80 ? `${bullet.slice(0, 77)}...` : bullet;
-				packages.get(currentPkg)?.get(currentCat)?.push(condensed);
-			}
-		}
-	}
-	return packages;
-}
-
-function fetchReleaseNotes(tag: string, repo: string): ReleaseNotes {
-	const res = runGh(["release", "view", tag, "--repo", repo, "--json", "tagName,body,publishedAt"]);
-	if (res.exitCode !== 0) {
-		return { tag, found: false, publishedAt: null, packages: new Map() };
-	}
-	try {
-		const data = JSON.parse(res.stdout) as { tagName?: string; body?: string; publishedAt?: string };
-		return {
-			tag,
-			found: true,
-			publishedAt: data.publishedAt ?? null,
-			packages: parseReleaseBody(data.body ?? ""),
-		};
-	} catch {
-		return { tag, found: false, publishedAt: null, packages: new Map() };
-	}
 }
 
 function resolveOldBaseLabel(oldBase: string): string {
@@ -369,8 +283,8 @@ function stepVerify(opts: CliOptions): void {
 	}
 }
 
-function stepBuild(opts: CliOptions): void {
-	console.log("\n=== Step 5: build ===");
+async function stepBuild(opts: CliOptions): Promise<void> {
+	console.log("\n=== Step 5: build (parallel) ===");
 	if (opts.skipBuild) {
 		setStatus("bun build:native", "SKIPPED");
 		setStatus("bun build", "SKIPPED");
@@ -378,12 +292,40 @@ function stepBuild(opts: CliOptions): void {
 		return;
 	}
 	if (opts.dryRun) {
-		console.log("[DRY-RUN] Would run: bun run build:native");
-		console.log("[DRY-RUN] Would run: bun run build");
+		console.log("[DRY-RUN] Would run in parallel: bun run build:native + bun run build");
 		return;
 	}
-	runCheckedStep("bun build:native", ["bun", "run", "build:native"]);
-	runCheckedStep("bun build", ["bun", "run", "build"]);
+
+	const builds: { label: string; cmd: string[] }[] = [
+		{ label: "bun build:native", cmd: ["bun", "run", "build:native"] },
+		{ label: "bun build", cmd: ["bun", "run", "build"] },
+	];
+
+	const procs = builds.map((b) => ({
+		label: b.label,
+		proc: Bun.spawn(b.cmd, { cwd: repoRoot, stdout: "pipe", stderr: "pipe" }),
+	}));
+
+	const results = await Promise.all(
+		procs.map(async (p) => ({
+			label: p.label,
+			exitCode: await p.proc.exited,
+			stdout: await new Response(p.proc.stdout as ReadableStream<Uint8Array>).text(),
+			stderr: await new Response(p.proc.stderr as ReadableStream<Uint8Array>).text(),
+		})),
+	);
+
+	for (const r of results) {
+		console.log(`\n--- ${r.label} ---`);
+		if (r.stdout.trim()) console.log(r.stdout.trim());
+		if (r.stderr.trim()) console.error(r.stderr.trim());
+		if (r.exitCode !== 0) {
+			console.error(`[FAIL] ${r.label} (exit ${r.exitCode})`);
+			process.exit(1);
+		}
+		setStatus(r.label, "PASS");
+		console.log(`[PASS] ${r.label}`);
+	}
 }
 
 function ensureLatestTag(state: SyncState): void {
@@ -404,10 +346,8 @@ function stepSummary(opts: CliOptions, state: SyncState): void {
 	console.log("\n=== Step 6: summary ===");
 	if (opts.dryRun) {
 		const tag = opts.tag ?? findLatestTag();
-		const repo = opts.repo ?? detectRepo();
 		console.log("[DRY-RUN] Would print sync summary");
 		console.log(`[DRY-RUN] Latest tag: ${tag}`);
-		console.log(`[DRY-RUN] Repo for release notes: ${repo ?? "(could not auto-detect)"}`);
 		return;
 	}
 
@@ -418,21 +358,6 @@ function stepSummary(opts: CliOptions, state: SyncState): void {
 	const newMain = runGit(["rev-parse", "main"]);
 	state.oldBase = oldBase;
 	state.newMain = newMain;
-
-	const tagsAtNew = runGit(["tag", "--sort=creatordate", "--merged", newMain, "--list", "v*"])
-		.split(/\r?\n/)
-		.filter(Boolean);
-	const tagsAtOld = new Set(
-		runGit(["tag", "--merged", oldBase, "--list", "v*"])
-			.split(/\r?\n/)
-			.filter(Boolean),
-	);
-	const newTags = tagsAtNew.filter((t) => !tagsAtOld.has(t));
-
-	const repo = opts.repo ?? detectRepo();
-	const releases: ReleaseNotes[] = newTags.map((tag) =>
-		repo ? fetchReleaseNotes(tag, repo) : { tag, found: false, publishedAt: null, packages: new Map() },
-	);
 
 	const oldTagOrSha = resolveOldBaseLabel(oldBase);
 	const localSha = runGit(["rev-parse", "local"]);
@@ -445,26 +370,8 @@ function stepSummary(opts: CliOptions, state: SyncState): void {
 	lines.push("  Upstream Sync Summary");
 	lines.push(bar);
 	lines.push("");
-	lines.push(
-		`Synced: ${oldTagOrSha} -> ${state.latestTag} (${newTags.length} release${newTags.length === 1 ? "" : "s"})`,
-	);
+	lines.push(`Synced: ${oldTagOrSha} -> ${state.latestTag}`);
 	lines.push(`Backup: local-backup @ ${backupSha}`);
-	lines.push("");
-
-	for (const rel of releases) {
-		lines.push(`  --- ${rel.tag} ---`);
-		if (!rel.found) {
-			lines.push("  (no GitHub release found for this tag)");
-			continue;
-		}
-		for (const [pkg, cats] of rel.packages) {
-			lines.push(`    ${pkg}:`);
-			for (const [cat, bullets] of cats) {
-				if (bullets.length === 0) continue;
-				lines.push(`      ${cat}: ${bullets.join("; ")}`);
-			}
-		}
-	}
 	lines.push("");
 	lines.push("  Verification:");
 	for (const s of stepStatus) {
@@ -501,7 +408,7 @@ async function main(): Promise<void> {
 	if (startIdx <= STEP_ORDER.indexOf("fetch")) await stepFetch(opts);
 	if (startIdx <= STEP_ORDER.indexOf("merge")) await stepMerge(opts, state);
 	if (startIdx <= STEP_ORDER.indexOf("verify") && !state.alreadyUpToDate) stepVerify(opts);
-	if (startIdx <= STEP_ORDER.indexOf("build") && !state.alreadyUpToDate) stepBuild(opts);
+	if (startIdx <= STEP_ORDER.indexOf("build") && !state.alreadyUpToDate) await stepBuild(opts);
 	if (startIdx <= STEP_ORDER.indexOf("summary")) stepSummary(opts, state);
 }
 
