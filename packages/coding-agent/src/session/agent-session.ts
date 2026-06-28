@@ -564,6 +564,8 @@ export interface AgentSessionConfig {
 	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
 	/** Rebuild the SSH tool from current capability discovery results. */
 	reloadSshTool?: () => Promise<AgentTool | null>;
+	/** Re-discover skills and return the fresh set so the session can update snapshots. */
+	reloadSkills?: () => Promise<{ skills: Skill[]; skillWarnings: SkillWarning[] }>;
 	requestedToolNames?: ReadonlySet<string>;
 	/**
 	 * Optional accessor for live MCP server instructions. Read by the session's
@@ -1486,6 +1488,7 @@ export class AgentSession {
 		| undefined;
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
 	#reloadSshTool: (() => Promise<AgentTool | null>) | undefined;
+	#reloadSkills: (() => Promise<{ skills: Skill[]; skillWarnings: SkillWarning[] }>) | undefined;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 	#requestedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
@@ -1889,6 +1892,7 @@ export class AgentSession {
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = config.getMcpServerInstructions;
 		this.#reloadSshTool = config.reloadSshTool;
+		this.#reloadSkills = config.reloadSkills;
 		this.#disconnectOwnedMcpManager = config.disconnectOwnedMcpManager;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
 		this.#promptModelKey = this.#currentPromptModelKey();
@@ -5745,6 +5749,30 @@ export class AgentSession {
 			nextActive.push(refreshedTool.name);
 		}
 		await this.#applyActiveToolsByName(nextActive);
+	}
+
+	/**
+	 * Re-discover skills from disk and update every snapshot that the session
+	 * freezes at startup: the private #skills/#skillWarnings fields, the
+	 * SDK-level activeSkills module-global (via the reloadSkills callback), the
+	 * toolSession.skills getter, and the system prompt (via the
+	 * rebuildSystemPrompt closure which reads the `skills` let binding live).
+	 * Returns the fresh skills so the TUI can rebuild its skillCommands map.
+	 */
+	async refreshSkills(): Promise<readonly Skill[]> {
+		resetCapabilities();
+		if (!this.#reloadSkills) return this.#skills;
+		const result = await this.#reloadSkills();
+		this.#skills = result.skills;
+		this.#skillWarnings = result.skillWarnings;
+		try {
+			await this.refreshBaseSystemPrompt();
+		} catch (refreshErr) {
+			logger.warn("System prompt refresh after skill reload failed", {
+				error: refreshErr instanceof Error ? refreshErr.message : String(refreshErr),
+			});
+		}
+		return result.skills;
 	}
 
 	/**

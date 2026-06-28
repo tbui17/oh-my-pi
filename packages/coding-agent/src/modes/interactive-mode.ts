@@ -65,6 +65,7 @@ import type {
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
+import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import { type GuidedGoalMessage, runGuidedGoalTurn } from "../goals/guided-setup";
 import type { Goal, GoalModeState } from "../goals/state";
@@ -1032,6 +1033,29 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		this.editor.setAutocompleteProvider(autocompleteProvider);
 		this.session.setSlashCommands(fileCommands);
+	}
+
+	/**
+	 * Rebuild the skillCommands map and #pendingSlashCommands skill entries from
+	 * a freshly discovered skill set. Called after `session.refreshSkills()` so
+	 * `/skill:<name>` autocomplete and dispatch reflect added/removed/renamed
+	 * skills without a session restart. Does not call refreshSlashCommandState —
+	 * the caller does that afterward so file commands reload in the same pass.
+	 */
+	rebuildSkillCommands(skills: readonly Skill[]): void {
+		this.skillCommands.clear();
+		const newSkillCommands: SlashCommand[] = [];
+		if (this.settings.get("skills.enableSkillCommands")) {
+			for (const skill of skills) {
+				const commandName = `skill:${skill.name}`;
+				this.skillCommands.set(commandName, skill.filePath);
+				newSkillCommands.push({ name: commandName, description: skill.description });
+			}
+		}
+		this.#pendingSlashCommands = [
+			...this.#pendingSlashCommands.filter(cmd => !cmd.name.startsWith("skill:")),
+			...newSkillCommands,
+		];
 	}
 
 	/**

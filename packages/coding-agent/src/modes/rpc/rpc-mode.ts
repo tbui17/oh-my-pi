@@ -670,6 +670,7 @@ export async function runRpcMode(
 		resetCapabilities();
 		session.setSlashCommands(await loadSlashCommands({ cwd }));
 		await session.refreshSshTool({ activateIfAvailable: true });
+		await session.refreshSkills();
 		await emitAvailableCommandsUpdate();
 	};
 	const emitAvailableCommandsUpdate = async () => {

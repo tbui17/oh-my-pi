@@ -1514,7 +1514,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skipPythonPreflight: options.skipPythonPreflight,
 			contextFiles,
 			workspaceTree: resolvedWorkspaceTree,
-			skills,
+			get skills() {
+				return skills;
+			},
 			rules: allRules,
 			eventBus,
 			outputSchema: options.outputSchema,
@@ -2166,6 +2168,24 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return new ExtensionToolWrapper(wrapped, extensionRunner) as AgentTool;
 		};
 
+		const reloadSkills = async (): Promise<{ skills: Skill[]; skillWarnings: SkillWarning[] }> => {
+			try {
+				const discovered = await discoverSkills(cwd, agentDir, {
+					...skillsSettings,
+					disabledExtensions: disabledExtensionIds,
+				});
+				skills = discovered.skills;
+				skillWarnings = discovered.warnings;
+				setActiveSkills(skills);
+				return { skills, skillWarnings };
+			} catch (err) {
+				logger.warn("Skill re-discovery failed; keeping existing skills", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+				return { skills, skillWarnings };
+			}
+		};
+
 		let cursorEventEmitter: ((event: AgentEvent) => void) | undefined;
 		const cursorExecHandlers = new CursorExecHandlers({
 			cwd,
@@ -2721,6 +2741,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
 			reloadSshTool,
+			reloadSkills,
 			requestedToolNames: requestedToolNameSet,
 			getMcpServerInstructions: mcpManager
 				? () => {

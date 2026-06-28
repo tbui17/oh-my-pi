@@ -1790,6 +1790,7 @@ export class AcpAgent implements Agent {
 		const fileCommands = await loadSlashCommands({ cwd });
 		record.session.setSlashCommands(fileCommands);
 		await record.session.refreshSshTool({ activateIfAvailable: true });
+		await record.session.refreshSkills();
 		await this.#emitAvailableCommandsUpdate(record);
 	}
 

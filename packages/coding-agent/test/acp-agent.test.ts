@@ -20,6 +20,7 @@ import {
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
@@ -183,6 +184,13 @@ class FakeAgentSession {
 	}
 
 	async refreshSshTool(_options?: { activateIfAvailable?: boolean }): Promise<void> {}
+
+	refreshSkillsCalls = 0;
+
+	async refreshSkills(): Promise<readonly Skill[]> {
+		this.refreshSkillsCalls++;
+		return this.skills;
+	}
 
 	async setModel(model: Model): Promise<void> {
 		this.model = model;
@@ -1343,6 +1351,76 @@ describe("ACP agent", () => {
 		expect(names).not.toContain("agents");
 		expect(names).not.toContain("extensions");
 		expect(names).not.toContain("hotkeys");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("calls refreshSkills and re-advertises new skill commands during /reload-plugins", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		// Start with one skill on the session.
+		const skillDir1 = path.join(harness.cwdA, ".skills", "alpha");
+		const skillPath1 = path.join(skillDir1, "SKILL.md");
+		await fs.promises.mkdir(skillDir1, { recursive: true });
+		await fs.promises.writeFile(skillPath1, "---\ndescription: Alpha skill\n---\n# Alpha\nDo work.\n");
+		session.skills = [
+			{
+				name: "alpha",
+				description: "Alpha skill",
+				filePath: skillPath1,
+				baseDir: skillDir1,
+				source: "test",
+			},
+		];
+
+		// Simulate a second skill being added to disk and discovered by refreshSkills.
+		const skillDir2 = path.join(harness.cwdA, ".skills", "beta");
+		const skillPath2 = path.join(skillDir2, "SKILL.md");
+		await fs.promises.mkdir(skillDir2, { recursive: true });
+		await fs.promises.writeFile(skillPath2, "---\ndescription: Beta skill\n---\n# Beta\nDo work.\n");
+
+		// refreshSkills stub: simulate re-discovery by returning both skills.
+		const refreshCallsBefore = session.refreshSkillsCalls;
+		session.skills = [
+			{
+				name: "alpha",
+				description: "Alpha skill",
+				filePath: skillPath1,
+				baseDir: skillDir1,
+				source: "test",
+			},
+			{
+				name: "beta",
+				description: "Beta skill",
+				filePath: skillPath2,
+				baseDir: skillDir2,
+				source: "test",
+			},
+		];
+
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000010",
+			prompt: [{ type: "text", text: "/reload-plugins" }],
+		} as PromptRequest);
+
+		// refreshSkills was called by #reloadPluginState.
+		expect(session.refreshSkillsCalls).toBeGreaterThan(refreshCallsBefore);
+
+		const commandUpdates = harness.updates.filter(
+			update =>
+				update.sessionId === created.sessionId && update.update.sessionUpdate === "available_commands_update",
+		);
+		const names = commandUpdates.flatMap(update =>
+			update.update.sessionUpdate === "available_commands_update"
+				? update.update.availableCommands.map(command => command.name)
+				: [],
+		);
+		expect(names).toContain("skill:alpha");
+		expect(names).toContain("skill:beta");
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

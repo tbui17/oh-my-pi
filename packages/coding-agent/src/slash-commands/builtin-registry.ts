@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
@@ -2172,8 +2173,11 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			// listClaudePluginRoots re-reads from disk on next access.
 			const projectPath = await resolveActiveProjectRegistryPath(runtime.ctx.sessionManager.getCwd());
 			clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-			await runtime.ctx.refreshSlashCommandState();
+			resetCapabilities();
 			await runtime.ctx.session.refreshSshTool({ activateIfAvailable: true });
+			const newSkills = await runtime.ctx.session.refreshSkills();
+			runtime.ctx.rebuildSkillCommands(newSkills);
+			await runtime.ctx.refreshSlashCommandState();
 			runtime.ctx.showStatus("Plugins reloaded.");
 			runtime.ctx.editor.setText("");
 		},
@@ -2510,8 +2514,11 @@ export async function executeBuiltinSlashCommand(
 			reloadPlugins: async () => {
 				const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
 				clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-				await ctx.refreshSlashCommandState();
+				resetCapabilities();
 				await ctx.session.refreshSshTool({ activateIfAvailable: true });
+				const newSkills = await ctx.session.refreshSkills();
+				ctx.rebuildSkillCommands(newSkills);
+				await ctx.refreshSlashCommandState();
 			},
 		};
 		const result = await command.handle(parsed, adapted);
