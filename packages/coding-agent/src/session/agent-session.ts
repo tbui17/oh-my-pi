@@ -10793,10 +10793,10 @@ export class AgentSession {
 						metadata: this.agent.metadataForProvider(model.provider),
 						convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 						telemetry,
-					// Honor the user's /model thinking selection (incl. `off`) on
-					// the manual `/compact` path unless compaction.model includes an
-					// explicit thinking selector. Clamped per-model inside compact().
-					thinkingLevel: model.thinkingLevel ?? this.thinkingLevel,
+						// Honor the user's /model thinking selection (incl. `off`) on
+						// the manual `/compact` path unless compaction.model includes an
+						// explicit thinking selector. Clamped per-model inside compact().
+						thinkingLevel: model.thinkingLevel ?? this.thinkingLevel,
 						tools: this.agent.state.tools,
 						sessionId: this.sessionId,
 						promptCacheKey: this.sessionId,
@@ -11396,10 +11396,10 @@ export class AgentSession {
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 									telemetry,
-								// Honor the user's /model thinking selection on the
-								// auto-compaction path unless compaction.model includes
-								// an explicit thinking selector. Clamped per-model inside compact().
-								thinkingLevel: model.thinkingLevel ?? this.thinkingLevel,
+									// Honor the user's /model thinking selection on the
+									// auto-compaction path unless compaction.model includes
+									// an explicit thinking selector. Clamped per-model inside compact().
+									thinkingLevel: model.thinkingLevel ?? this.thinkingLevel,
 									tools: this.agent.state.tools,
 									sessionId: this.sessionId,
 									promptCacheKey: this.sessionId,

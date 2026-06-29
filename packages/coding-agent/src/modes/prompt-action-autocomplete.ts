@@ -134,7 +134,6 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	#baseProvider: CombinedAutocompleteProvider;
 	#basePath: string;
 	#actions: PromptActionDefinition[];
-	#basePath: string;
 
 	constructor(commands: SlashCommand[], basePath: string, actions: PromptActionDefinition[]) {
 		this.#baseProvider = new CombinedAutocompleteProvider(commands, basePath);
