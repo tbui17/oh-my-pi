@@ -98,20 +98,21 @@ function resolveReasoningDisableMode(
 	}
 }
 
-function detectStreamMarkupHealingPattern(
-	provider: string,
-	modelId: string,
-): OpenAIStreamMarkupHealingPattern | undefined {
-	if (MINIMAX_PROVIDER_OR_ID_PATTERN.test(provider) || MINIMAX_PROVIDER_OR_ID_PATTERN.test(modelId)) {
-		return "thinking";
-	}
+/**
+ * Pick the leaked-markup healer for an OpenAI-compatible visible-text stream.
+ * Kimi chat-template tokens and DeepSeek DSML envelopes need their dedicated
+ * tool-call grammars; every other model defaults to `"thinking"`. All patterns
+ * run the generic thinking healer, so leaked reasoning idioms (e.g. a Gemini
+ * ` ```thinking ` fence on OpenRouter) are always recovered from `delta.content`.
+ */
+function detectStreamMarkupHealingPattern(provider: string, modelId: string): OpenAIStreamMarkupHealingPattern {
 	if (provider === "kimi-code" || provider === "moonshot" || /kimi[-/_.]?k2/i.test(modelId)) {
 		return "kimi";
 	}
 	if (isDeepseekModelIdOrName(modelId) && DSML_HEALING_PROVIDERS.has(provider)) {
 		return "dsml";
 	}
-	return undefined;
+	return "thinking";
 }
 
 /**
@@ -403,6 +404,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		disableReasoningOnToolChoice: isDeepseekFamily && Boolean(spec.reasoning) && !isOpenRouter,
 		supportsToolChoice: !isDirectDeepseekReasoning,
 		supportsForcedToolChoice: true,
+		supportsNamedToolChoice: provider !== "llama.cpp",
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: isMistral,
 		requiresAssistantAfterToolResult: isMistral,
@@ -593,6 +595,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		disableReasoningOnToolChoice: isDeepseekFamily && reasoningCapable && !isOpenRouter,
 		supportsToolChoice: true,
 		supportsForcedToolChoice: true,
+		supportsNamedToolChoice: true,
 		reasoningContentField: "reasoning_content",
 		requiresReasoningContentForToolCalls:
 			(isKimiModel || (isDeepseekFamily && reasoningCapable) || (isOpenRouter && reasoningCapable)) &&

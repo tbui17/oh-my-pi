@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
 import * as natives from "@oh-my-pi/pi-natives";
+import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
 
@@ -54,7 +55,7 @@ async function createGitRepo(): Promise<{ baseBranch: string; repo: string }> {
 afterEach(async () => {
 	vi.restoreAllMocks();
 	jj.repo.clearRootCache();
-	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 describe("worktree isolation helpers", () => {
 	it("returns platform-specific null path for git --no-index diffs", () => {
@@ -113,7 +114,7 @@ describe("worktree isolation helpers", () => {
 		});
 
 		afterAll(async () => {
-			await fs.rm(repo, { recursive: true, force: true });
+			await removeWithRetries(repo);
 		});
 
 		afterEach(() => {
@@ -146,6 +147,39 @@ describe("worktree isolation helpers", () => {
 			expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
 			expect(handle.fellBack).toBe(true);
 			expect(handle.fallbackReason).toBe(unavailable.message);
+		});
+
+		it("uses compact isolation paths that do not embed long task ids", async () => {
+			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-base-"));
+			tempDirs.push(worktreeBase);
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(worktreeBase);
+			vi.spyOn(natives, "isoResolve").mockReturnValue({
+				kind: natives.IsoBackendKind.Rcopy,
+				candidates: [natives.IsoBackendKind.Rcopy],
+				fellBack: false,
+				reason: undefined,
+			});
+			vi.spyOn(natives, "isoStart").mockResolvedValue(undefined);
+
+			try {
+				const longTaskId = "orchestrate-goal-execution.Test1-0982d2a";
+				const handle = await ensureIsolation(repo, longTaskId);
+				const mergedLeaf = path.basename(handle.mergedDir);
+				const isolationSegment = path.basename(path.dirname(handle.mergedDir));
+
+				expect(mergedLeaf).toBe("m");
+				expect(isolationSegment).not.toContain(longTaskId);
+				expect(isolationSegment.length).toBeLessThanOrEqual(12);
+			} finally {
+				if (originalWorktreeDir === undefined) {
+					delete process.env.OMP_WORKTREE_DIR;
+				} else {
+					process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+				}
+				setWorktreesDir(undefined);
+			}
 		});
 
 		// First mutator: runs on the pristine fixture, so no reset is needed. Leaves
@@ -307,7 +341,7 @@ describe("applyNestedPatches", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(parentRepo, { recursive: true, force: true });
+		await removeWithRetries(parentRepo);
 	});
 
 	it("does not fold pre-existing dirty nested-repo state into the agent commit", async () => {
