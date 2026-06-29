@@ -135,6 +135,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 		},
 		uiContext,
+		() => session.toolSession,
 	);
 
 	runner.onError(reportRuntimeError);

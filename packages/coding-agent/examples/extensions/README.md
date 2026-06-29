@@ -25,12 +25,13 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 ### Custom Tools
 
-| Extension     | Description                                                                   |
-| ------------- | ----------------------------------------------------------------------------- |
-| `todo.ts`     | Todo list tool + `/todos` command with custom rendering and state persistence |
-| `hello.ts`    | Minimal custom tool example                                                   |
-| `question.ts` | Demonstrates `ctx.ui.select()` for asking the user questions                  |
-| `subagent/`   | Delegate tasks to specialized subagents with isolated context windows         |
+| Extension       | Description                                                                   |
+| --------------- | ----------------------------------------------------------------------------- |
+| `todo.ts`       | Todo list tool + `/todos` command with custom rendering and state persistence |
+| `hello.ts`      | Minimal custom tool example                                                   |
+| `review-loop.ts`| Worker→reviewer→revise subagent loop via `runEvalAgent` + `getToolSession()`   |
+| `question.ts`   | Demonstrates `ctx.ui.select()` for asking the user questions                  |
+| `subagent/`     | Delegate tasks to specialized subagents with isolated context windows         |
 
 ### Commands & UI
 

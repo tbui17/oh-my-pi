@@ -238,7 +238,13 @@ export class ExtensionUiController {
 			},
 		};
 
-		extensionRunner.initialize(actions, contextActions, commandActions, uiContext);
+		extensionRunner.initialize(
+			actions,
+			contextActions,
+			commandActions,
+			uiContext,
+			() => this.ctx.session.toolSession,
+		);
 
 		// Subscribe to extension errors
 		extensionRunner.onError((error: ExtensionError) => {
@@ -466,7 +472,13 @@ export class ExtensionUiController {
 			},
 		};
 
-		extensionRunner.initialize(actions, contextActions, commandActions, uiContext);
+		extensionRunner.initialize(
+			actions,
+			contextActions,
+			commandActions,
+			uiContext,
+			() => this.ctx.session.toolSession,
+		);
 	}
 
 	/**

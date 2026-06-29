@@ -10,6 +10,7 @@ import type { Settings } from "../../config/settings";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { SessionManager } from "../../session/session-manager";
+import type { ToolSession } from "../../tools";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { createExtensionModelQuery } from "./model-api";
 import type {
@@ -210,6 +211,7 @@ export class ExtensionRunner {
 	#reloadHandler: () => Promise<void> = async () => {};
 	#shutdownHandler: ShutdownHandler = () => {};
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
+	#getToolSessionFn?: () => ToolSession | undefined;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	#initialized = false;
 	/**
@@ -239,6 +241,7 @@ export class ExtensionRunner {
 		contextActions: ExtensionContextActions,
 		commandContextActions?: ExtensionCommandContextActions,
 		uiContext?: ExtensionUIContext,
+		getToolSession?: () => ToolSession | undefined,
 	): void {
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
@@ -275,6 +278,7 @@ export class ExtensionRunner {
 		}
 
 		this.#uiContext = uiContext ?? noOpUIContext;
+		this.#getToolSessionFn = getToolSession ?? contextActions.getToolSession;
 		this.#initialized = true;
 
 		// Drain events buffered by emitCredentialDisabled() before initialize ran. The
@@ -512,6 +516,7 @@ export class ExtensionRunner {
 			shutdown: () => this.#shutdownHandler(),
 			getSystemPrompt: () => this.#getSystemPromptFn(),
 			memory: this.#getMemoryFn?.(),
+			getToolSession: () => this.#getToolSessionFn?.(),
 		};
 	}
 

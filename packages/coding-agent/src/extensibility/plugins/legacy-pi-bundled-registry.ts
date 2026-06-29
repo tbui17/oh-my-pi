@@ -384,6 +384,7 @@ import * as bundledPiCodingAgentEditReadFile from "@oh-my-pi/pi-coding-agent/edi
 import * as bundledPiCodingAgentEditRenderer from "@oh-my-pi/pi-coding-agent/edit/renderer";
 import * as bundledPiCodingAgentEditStreaming from "@oh-my-pi/pi-coding-agent/edit/streaming";
 import * as bundledPiCodingAgentEval from "@oh-my-pi/pi-coding-agent/eval";
+import * as bundledPiCodingAgentEvalAgentBridge from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
 import * as bundledPiCodingAgentEvalJsContextManager from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import * as bundledPiCodingAgentEvalJsExecutor from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import * as bundledPiCodingAgentEvalJsToolBridge from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
@@ -1349,6 +1350,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@oh-my-pi/pi-coding-agent/eval": bundledPiCodingAgentEval as unknown as Readonly<Record<string, unknown>>,
+	"@oh-my-pi/pi-coding-agent/eval/agent-bridge": bundledPiCodingAgentEvalAgentBridge as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@oh-my-pi/pi-coding-agent/lsp": bundledPiCodingAgentLsp as unknown as Readonly<Record<string, unknown>>,
 	"@oh-my-pi/pi-coding-agent/lsp/clients": bundledPiCodingAgentLspClients as unknown as Readonly<
 		Record<string, unknown>

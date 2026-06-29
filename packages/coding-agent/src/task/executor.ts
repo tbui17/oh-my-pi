@@ -2272,6 +2272,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						getSystemPrompt: () => session.systemPrompt,
 						compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 					},
+					undefined,
+					undefined,
+					() => session.toolSession,
 				);
 				extensionRunner.onError(err => {
 					logger.error("Extension error", { path: err.extensionPath, error: err.error });

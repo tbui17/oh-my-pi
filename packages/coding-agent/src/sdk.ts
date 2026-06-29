@@ -2713,6 +2713,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			advisorReadOnlyTools,
 		});
 		hasSession = true;
+		session.toolSession = toolSession;
 		if (asyncJobManager) {
 			session.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => asyncJobManager.isDeliverySuppressed(entry.jobId),

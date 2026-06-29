@@ -2205,6 +2205,7 @@ export class AcpAgent implements Agent {
 			// `AcpAgent` field would still be wrong because it would also lose
 			// the per-`record` binding.
 			createAcpExtensionUiContext(this.#connection, () => record.session.sessionId, this.#clientCapabilities),
+			() => record.session.toolSession,
 		);
 		await extensionRunner.emit({ type: "session_start" });
 		record.extensionsConfigured = true;

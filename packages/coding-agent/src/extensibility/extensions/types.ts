@@ -56,6 +56,7 @@ import type {
 	ReadToolInput,
 	SearchToolDetails,
 	SearchToolInput,
+	ToolSession,
 	WriteToolInput,
 } from "../../tools";
 import type { ApprovalMode } from "../../tools/approval";
@@ -361,6 +362,11 @@ export interface ExtensionContext {
 	getSystemPrompt(): string[];
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
+	/**
+	 * Access the session's ToolSession for programmatic subagent spawning
+	 * (eval agent bridge, TaskTool, etc.). Undefined in contexts without a live session.
+	 */
+	getToolSession?: () => ToolSession | undefined;
 }
 
 /**
@@ -1341,6 +1347,7 @@ export interface ExtensionContextActions {
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
+	getToolSession?: () => ToolSession | undefined;
 }
 
 /** Actions for ExtensionCommandContext (ctx.* in command handlers). */

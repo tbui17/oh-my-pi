@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getToolSession()` to `ExtensionContext` so extension tools and command handlers can spawn subagents (eval agent bridge, TaskTool) from hand-authored TypeScript without routing through eval code strings. `runEvalAgent` and its option/result types are now exported from `@oh-my-pi/pi-coding-agent/eval/agent-bridge` (and the `eval` barrel); the bundled plugin registry resolves the subpath import for installed plugins. `AgentSession.toolSession` (getter/setter) threads the fully-constructed `ToolSession` from `createAgentSession` to all five `ExtensionRunner.initialize()` call sites (interactive, reload, RPC/print, ACP, task executor).
+- Added a `review-loop.ts` example extension demonstrating the `runEvalAgent` + `getToolSession()` API: a worker agent produces work, a reviewer agent returns a JSON-validated verdict, the worker revises, and a reporter summarizes the outcome — a deterministic review-revise loop with no model-in-the-loop orchestration.
+
 ## [16.1.23] - 2026-06-26
 
 ### Added

@@ -268,6 +268,7 @@ import {
 	isMCPToolName,
 	selectDiscoverableToolNamesByServer,
 } from "../tool-discovery/tool-index";
+import type { ToolSession } from "../tools";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import type { CheckpointState } from "../tools/checkpoint";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
@@ -1144,6 +1145,13 @@ export class AgentSession {
 	readonly yieldQueue: YieldQueue;
 	fileSnapshotStore?: InMemorySnapshotStore;
 	#autoApprove: boolean;
+	/**
+	 * The session's ToolSession, set by `createAgentSession` after the toolSession
+	 * object is constructed. Exposed via {@link getToolSession} so extension tools
+	 * and command handlers can spawn subagents (eval agent bridge, TaskTool) without
+	 * rebuilding a ToolSession from ExtensionContext fragments.
+	 */
+	#toolSession: ToolSession | undefined;
 
 	#powerAssertion: MacOSPowerAssertion | undefined;
 
@@ -13561,5 +13569,20 @@ export class AgentSession {
 	 */
 	get extensionRunner(): ExtensionRunner | undefined {
 		return this.#extensionRunner;
+	}
+
+	/**
+	 * The session's ToolSession. Set by `createAgentSession` after the toolSession
+	 * object is constructed (it depends on `session` via closures, so it cannot
+	 * be passed to the AgentSession constructor). Exposed so extension tools and
+	 * command handlers can spawn subagents (eval agent bridge, TaskTool) without
+	 * rebuilding a ToolSession from ExtensionContext fragments.
+	 */
+	get toolSession(): ToolSession | undefined {
+		return this.#toolSession;
+	}
+
+	set toolSession(session: ToolSession | undefined) {
+		this.#toolSession = session;
 	}
 }
