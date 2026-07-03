@@ -57,7 +57,7 @@ const stepStatus: { label: string; status: StepResultStatus }[] = [
 ];
 
 function setStatus(label: string, status: StepResultStatus): void {
-	const entry = stepStatus.find((s) => s.label === label);
+	const entry = stepStatus.find(s => s.label === label);
 	if (entry) entry.status = status;
 }
 
@@ -104,9 +104,7 @@ function parseArgs(argv: string[]): CliOptions {
 		}
 	}
 	if (!STEP_ORDER.includes(options.fromStep)) {
-		console.error(
-			`Invalid --from-step value: ${options.fromStep}. Expected one of: ${STEP_ORDER.join(", ")}`,
-		);
+		console.error(`Invalid --from-step value: ${options.fromStep}. Expected one of: ${STEP_ORDER.join(", ")}`);
 		process.exit(1);
 	}
 	return options;
@@ -145,7 +143,7 @@ function runStep(name: string, command: string[], opts?: { cwd?: string }): { ex
 function findLatestTag(): string {
 	const out = runGit(["tag", "--sort=-creatordate", "--list", "v*"]);
 	const first = out.split(/\r?\n/)[0]?.trim();
-	if (!first || !first.startsWith("v")) {
+	if (!first?.startsWith("v")) {
 		throw new Error("No release tags (v*) found in repository.");
 	}
 	return first;
@@ -154,11 +152,11 @@ function findLatestTag(): string {
 function resolveOldBaseLabel(oldBase: string): string {
 	const pointed = runGitNoThrow(["tag", "--points-at", oldBase, "--list", "v*"]).stdout;
 	const first = pointed.split(/\r?\n/)[0]?.trim();
-	if (first && first.startsWith("v")) return first;
+	if (first?.startsWith("v")) return first;
 	return runGit(["rev-parse", "--short", oldBase]);
 }
 
-function runPreFlight(opts: CliOptions): void {
+function runPreFlight(_opts: CliOptions): void {
 	const branch = runGit(["rev-parse", "--abbrev-ref", "HEAD"]);
 	if (branch !== "local") {
 		console.error(`Pre-flight failed: expected branch 'local', currently on '${branch}'.`);
@@ -301,13 +299,13 @@ async function stepBuild(opts: CliOptions): Promise<void> {
 		{ label: "bun build", cmd: ["bun", "run", "build"] },
 	];
 
-	const procs = builds.map((b) => ({
+	const procs = builds.map(b => ({
 		label: b.label,
 		proc: Bun.spawn(b.cmd, { cwd: repoRoot, stdout: "pipe", stderr: "pipe" }),
 	}));
 
 	const results = await Promise.all(
-		procs.map(async (p) => ({
+		procs.map(async p => ({
 			label: p.label,
 			exitCode: await p.proc.exited,
 			stdout: await new Response(p.proc.stdout as ReadableStream<Uint8Array>).text(),
@@ -334,7 +332,7 @@ function ensureLatestTag(state: SyncState): void {
 	if (mainSha) {
 		const pointed = runGitNoThrow(["tag", "--points-at", mainSha, "--list", "v*"]).stdout;
 		const t = pointed.split(/\r?\n/)[0]?.trim();
-		state.latestTag = t && t.startsWith("v") ? t : findLatestTag();
+		state.latestTag = t?.startsWith("v") ? t : findLatestTag();
 		state.tagSha = mainSha;
 	} else {
 		state.latestTag = findLatestTag();
