@@ -1,5 +1,5 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Effort, Model } from "@oh-my-pi/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -924,10 +924,7 @@ export class ModelSelectorComponent extends Container {
 	}
 
 	#getThinkingLevelsForModel(model: Model): ReadonlyArray<ConfiguredThinkingLevel> {
-		const efforts = getSupportedEfforts(model)
-			.map(parseEffort)
-			.filter((e): e is Effort => e !== undefined);
-		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...efforts];
+		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
 	}
 
 	#getCurrentRoleThinkingLevel(role: string): ConfiguredThinkingLevel {
