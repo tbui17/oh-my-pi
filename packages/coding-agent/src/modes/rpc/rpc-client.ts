@@ -46,6 +46,8 @@ export interface RpcClientOptions {
 	cwd?: string;
 	/** Environment variables */
 	env?: Record<string, string>;
+	/** Path to the bun executable (default: "bun"). Set to the full path when bun is not on PATH. */
+	bunPath?: string;
 	/** Provider to use */
 	provider?: string;
 	/** Model ID to use */
@@ -231,7 +233,6 @@ export class RpcClient {
 			throw new Error("Client already started");
 		}
 
-		const cliPath = this.options.cliPath ?? "dist/cli.js";
 		const args = ["--mode", "rpc"];
 
 		if (this.options.provider) {
@@ -247,7 +248,13 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		this.#process = ptree.spawn(["bun", cliPath, ...args], {
+		// When bunPath is a self-contained CLI binary (e.g. compiled omp.exe),
+		// cliPath is omitted — the binary accepts flags directly.
+		const bunPath = this.options.bunPath ?? "bun";
+		const cliPath = this.options.cliPath ?? (this.options.bunPath ? null : "dist/cli.js");
+		const cmd = cliPath ? [bunPath, cliPath, ...args] : [bunPath, ...args];
+
+		this.#process = ptree.spawn(cmd, {
 			cwd: this.options.cwd,
 			env: { ...Bun.env, ...this.options.env },
 			stdin: "pipe",
@@ -392,6 +399,15 @@ export class RpcClient {
 	onAvailableCommandsUpdate(listener: RpcAvailableCommandsUpdateListener): () => void {
 		this.#availableCommandsUpdateListeners.add(listener);
 		return () => this.#availableCommandsUpdateListeners.delete(listener);
+	}
+
+	/**
+	 * Subscribe to extension UI requests (set_editor_text, notify, setStatus, etc.).
+	 * These are fire-and-forget events emitted when an extension calls ctx.ui methods.
+	 */
+	onExtensionUiRequest(listener: (req: RpcExtensionUIRequest) => void): () => void {
+		this.#extensionUiListeners.add(listener);
+		return () => this.#extensionUiListeners.delete(listener);
 	}
 
 	/**
