@@ -11598,10 +11598,12 @@ export class AgentSession {
 			const resolved = resolveModelRoleValue(configuredModel, availableModels, {
 				settings: this.settings,
 				matchPreferences: getModelMatchPreferences(this.settings),
-				modelRegistry: this.#modelRegistry,
 			});
 			if (resolved.model) {
-				addCandidate(resolved.model, resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined);
+				addCandidate(
+					resolved.model,
+					resolved.explicitThinkingLevel ? concreteThinkingLevel(resolved.thinkingLevel) : undefined,
+				);
 			} else {
 				logger.warn("Configured compaction model could not be resolved", {
 					model: configuredModel,

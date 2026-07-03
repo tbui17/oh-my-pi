@@ -1094,7 +1094,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.settings.get("skills.enableSkillCommands")) {
 			for (const skill of skills) {
 				const commandName = `skill:${skill.name}`;
-				this.skillCommands.set(commandName, skill.filePath);
+				this.skillCommands.set(commandName, skill);
 				newSkillCommands.push({ name: commandName, description: skill.description });
 			}
 		}
