@@ -1,6 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type AssistantMessage, getPriorityPremiumRequests, type ServiceTier } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessage,
+	coerceServiceTierByFamily,
+	getPriorityPremiumRequests,
+	resolveModelServiceTier,
+	type ServiceTierByFamily,
+	type ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
@@ -8,6 +15,8 @@ import type {
 	SessionEntry,
 	SessionMessageEntry,
 	SessionServiceTierChangeEntry,
+	ToolCallStats,
+	ToolResultLink,
 	UserMessageLink,
 	UserMessageStats,
 } from "./types";
@@ -80,6 +89,14 @@ function isServiceTierChange(entry: SessionEntry): entry is SessionServiceTierCh
 }
 
 /**
+ * Check if an entry is a tool-result message.
+ */
+function isToolResultMessage(entry: SessionEntry): entry is SessionMessageEntry {
+	if (entry.type !== "message") return false;
+	return (entry as SessionMessageEntry).message?.role === "toolResult";
+}
+
+/**
  * Extract plain text from a user message content payload.
  */
 function extractUserText(content: unknown): string {
@@ -130,7 +147,7 @@ function extractStats(
 	sessionFile: string,
 	folder: string,
 	entry: SessionMessageEntry,
-	currentServiceTier: ServiceTier | undefined,
+	currentServiceTier: ServiceTierByFamily | undefined,
 	agentType: AgentType,
 ): MessageStats | null {
 	const msg = entry.message as AssistantMessage;
@@ -143,7 +160,9 @@ function extractStats(
 	// non-zero value already in `usage.premiumRequests` (Copilot multipliers or
 	// the new AI code path) and only synthesise when the field is missing/zero.
 	const recorded = msg.usage.premiumRequests ?? 0;
-	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(currentServiceTier, msg.provider);
+	const model = { provider: msg.provider, api: msg.api, id: msg.model };
+	const tier = resolveModelServiceTier(currentServiceTier, model);
+	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(tier, model);
 	const usage = derived === recorded ? msg.usage : { ...msg.usage, premiumRequests: derived };
 
 	return {
@@ -163,55 +182,114 @@ function extractStats(
 	};
 }
 
+/**
+ * Extract one {@link ToolCallStats} per `toolCall` content block of an
+ * assistant message. Returns an empty array for turns without tool calls.
+ */
+function extractToolCalls(
+	sessionFile: string,
+	folder: string,
+	entry: SessionMessageEntry,
+	agentType: AgentType,
+): ToolCallStats[] {
+	const msg = entry.message as AssistantMessage;
+	if (msg?.role !== "assistant" || !Array.isArray(msg.content)) return [];
+
+	const blocks = msg.content.filter(block => block.type === "toolCall");
+	if (blocks.length === 0) return [];
+
+	return blocks.map(block => {
+		let argsChars = 0;
+		try {
+			argsChars = JSON.stringify(block.arguments ?? {}).length;
+		} catch {
+			// Non-serializable arguments (shouldn't happen in persisted JSONL); size unknown.
+		}
+		return {
+			sessionFile,
+			entryId: entry.id,
+			toolCallId: block.id,
+			folder,
+			toolName: block.name,
+			model: msg.model,
+			provider: msg.provider,
+			timestamp: msg.timestamp,
+			agentType,
+			callsInTurn: blocks.length,
+			argsChars,
+		};
+	});
+}
+
+/**
+ * Build the result linkage for a `toolResult` entry: text characters fed back
+ * into context plus the error flag, keyed to the originating call.
+ */
+function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry): ToolResultLink | null {
+	const msg = entry.message as ToolResultMessage;
+	if (msg.role !== "toolResult" || typeof msg.toolCallId !== "string" || msg.toolCallId.length === 0) return null;
+	let resultChars = 0;
+	if (Array.isArray(msg.content)) {
+		for (const block of msg.content) {
+			if (block.type === "text" && typeof block.text === "string") resultChars += block.text.length;
+		}
+	}
+	return {
+		sessionFile,
+		toolCallId: msg.toolCallId,
+		resultChars,
+		isError: msg.isError === true,
+	};
+}
+
 const LF = 0x0a;
+const CR = 0x0d;
+const jsonLineDecoder = new TextDecoder();
+
+function parseJsonLine(bytes: Uint8Array, start: number, end: number): SessionEntry | null {
+	while (end > start && bytes[end - 1] === CR) end--;
+	if (end <= start) return null;
+	try {
+		return JSON.parse(jsonLineDecoder.decode(bytes.subarray(start, end))) as SessionEntry;
+	} catch {
+		return null;
+	}
+}
+
+function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEntry) => void): number {
+	let cursor = 0;
+	let read = 0;
+
+	while (cursor < bytes.length) {
+		const newline = bytes.indexOf(LF, cursor);
+		const hasNewline = newline !== -1;
+		const lineEnd = hasNewline ? newline : bytes.length;
+		const entry = parseJsonLine(bytes, cursor, lineEnd);
+		if (entry) {
+			visit(entry);
+			read = hasNewline ? newline + 1 : lineEnd;
+		} else if (hasNewline) {
+			read = newline + 1;
+		} else {
+			break;
+		}
+		cursor = hasNewline ? newline + 1 : lineEnd;
+	}
+
+	return read;
+}
 
 function parseSessionEntriesLenient(bytes: Uint8Array): { entries: SessionEntry[]; read: number } {
 	const entries: SessionEntry[] = [];
-	let cursor = 0;
-
-	while (cursor < bytes.length) {
-		const { values, error, read, done } = Bun.JSONL.parseChunk(bytes, cursor, bytes.length);
-		for (const value of values as SessionEntry[]) {
-			entries.push(value);
-		}
-
-		if (error) {
-			const nextNewline = bytes.indexOf(LF, Math.max(read, cursor));
-			if (nextNewline === -1) break;
-			cursor = nextNewline + 1;
-			continue;
-		}
-
-		if (read <= cursor) break;
-		cursor = read;
-		if (done) break;
-	}
-
-	return { entries, read: cursor };
+	const read = visitSessionEntriesLenient(bytes, entry => entries.push(entry));
+	return { entries, read };
 }
 
-function scanLastServiceTier(bytes: Uint8Array): ServiceTier | undefined {
-	let cursor = 0;
-	let currentServiceTier: ServiceTier | undefined;
-
-	while (cursor < bytes.length) {
-		const { values, error, read, done } = Bun.JSONL.parseChunk(bytes, cursor, bytes.length);
-		for (const value of values as SessionEntry[]) {
-			if (isServiceTierChange(value)) currentServiceTier = value.serviceTier ?? undefined;
-		}
-
-		if (error) {
-			const nextNewline = bytes.indexOf(LF, Math.max(read, cursor));
-			if (nextNewline === -1) break;
-			cursor = nextNewline + 1;
-			continue;
-		}
-
-		if (read <= cursor) break;
-		cursor = read;
-		if (done) break;
-	}
-
+function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
+	let currentServiceTier: ServiceTierByFamily | undefined;
+	visitSessionEntriesLenient(bytes, entry => {
+		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+	});
 	return currentServiceTier;
 }
 /**
@@ -234,6 +312,8 @@ export interface ParseSessionResult {
 	stats: MessageStats[];
 	userStats: UserMessageStats[];
 	userLinks: UserMessageLink[];
+	toolCalls: ToolCallStats[];
+	toolResults: ToolResultLink[];
 	newOffset: number;
 }
 export async function parseSessionFile(sessionPath: string, fromOffset = 0): Promise<ParseSessionResult> {
@@ -241,7 +321,8 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	try {
 		bytes = await Bun.file(sessionPath).bytes();
 	} catch (err) {
-		if (isEnoent(err)) return { stats: [], userStats: [], userLinks: [], newOffset: fromOffset };
+		if (isEnoent(err))
+			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
 		throw err;
 	}
 
@@ -250,17 +331,19 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const stats: MessageStats[] = [];
 	const userStats: UserMessageStats[] = [];
 	const userLinks: UserMessageLink[] = [];
+	const toolCalls: ToolCallStats[] = [];
+	const toolResults: ToolResultLink[] = [];
 	const userByEntryId = new Map<string, UserMessageStats>();
 	const start = Math.max(0, Math.min(fromOffset, bytes.length));
 	const unprocessed = bytes.subarray(start);
 	const { entries, read } = parseSessionEntriesLenient(unprocessed);
-	let currentServiceTier: ServiceTier | undefined;
+	let currentServiceTier: ServiceTierByFamily | undefined;
 	if (start > 0) {
 		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
 	}
 	for (const entry of entries) {
 		if (isServiceTierChange(entry)) {
-			currentServiceTier = entry.serviceTier ?? undefined;
+			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 			continue;
 		}
 		if (isUserMessage(entry)) {
@@ -271,9 +354,15 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 			}
 			continue;
 		}
+		if (isToolResultMessage(entry)) {
+			const link = extractToolResultLink(sessionPath, entry);
+			if (link) toolResults.push(link);
+			continue;
+		}
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
+			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
 			// Link assistant's responding model back to the user message it answered.
 			const parentId = (entry as SessionMessageEntry).parentId;
 			if (parentId) {
@@ -296,7 +385,7 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		}
 	}
 
-	return { stats, userStats, userLinks, newOffset: start + read };
+	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
 }
 
 /**

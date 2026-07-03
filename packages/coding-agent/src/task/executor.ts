@@ -7,7 +7,7 @@
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentTelemetryConfig, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTier, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
 import { ModelRegistry } from "../config/model-registry";
@@ -18,7 +18,7 @@ import {
 	resolveModelOverrideWithAuthFallback,
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
-import { resolveSubagentServiceTier } from "../config/service-tier";
+import { buildServiceTierByFamily, resolveSubagentServiceTier } from "../config/service-tier";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -80,18 +80,20 @@ const MCP_CALL_TIMEOUT_MS = 60_000;
 
 /**
  * Soft per-agent request budgets (assistant requests per run). When a subagent
- * crosses its budget it receives ONE steering notice asking it to wrap up; at
- * 1.5x the budget the run is aborted gracefully so partial output is salvaged.
- * The `default` key applies to agents without an explicit entry and can be
- * overridden via the `task.softRequestBudget` setting (0 disables the guard).
+ * crosses its budget it can receive an optional steering notice asking it to
+ * wrap up; at 1.5x the budget the run is aborted gracefully so partial output is
+ * salvaged. The `default` key applies to agents without an explicit entry and
+ * can be overridden via the `task.softRequestBudget` setting (0 disables the
+ * guard). The notice is off by default and controlled separately by
+ * `task.softRequestBudgetNotice`.
  */
 export const SOFT_REQUEST_BUDGET: Record<string, number> = {
 	explore: 40,
-	quick_task: 40,
+	sonic: 40,
 	default: 90,
 };
 
-/** Steering notice injected once when a subagent crosses its soft request budget. */
+/** Optional steering notice injected when a subagent crosses its soft request budget. */
 export function buildBudgetNotice(requests: number): string {
 	return `[budget notice] You have used ${requests} requests in this run. Wrap up now: finish the current step and yield your final report.`;
 }
@@ -295,6 +297,11 @@ export interface ExecutorOptions {
 	parentActiveModelPattern?: string;
 	thinkingLevel?: ThinkingLevel;
 	outputSchema?: unknown;
+	/**
+	 * Caller supplied a schema that supersedes the agent's native output prompt.
+	 * Eval `agent(..., schema=...)` sets this so built-in agents ignore stale yield labels.
+	 */
+	outputSchemaOverridesAgent?: boolean;
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
 	/**
@@ -344,12 +351,12 @@ export interface ExecutorOptions {
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
 	/**
-	 * Parent session's live effective service tier, the source of truth for a
-	 * subagent whose `serviceTierSubagent` is `"inherit"`. `null` = the parent
+	 * Parent session's live per-family service tiers, the source of truth for a
+	 * subagent whose `tier.subagent` is `"inherit"`. `null` = the parent
 	 * explicitly has no tier (e.g. `/fast off`); omitted = no live session, so
-	 * inherit falls back to the configured `serviceTier` setting.
+	 * inherit falls back to the subagent's configured `tier.*` settings.
 	 */
-	parentServiceTier?: ServiceTier | null;
+	parentServiceTier?: ServiceTierByFamily | null;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
@@ -739,21 +746,28 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 export function createSubagentSettings(
 	baseSettings: Settings,
 	overrides?: Partial<Record<SettingPath, unknown>>,
-	inheritedServiceTier?: ServiceTier | null,
+	inheritedServiceTier?: ServiceTierByFamily | null,
 ): Settings {
 	const snapshot: Partial<Record<SettingPath, unknown>> = {};
 	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		snapshot[key] = baseSettings.get(key);
 	}
-	// Resolve the subagent's service tier from `serviceTierSubagent` ("inherit" =
-	// match the parent's live tier when a live session supplied one, else the
-	// configured `serviceTier`). The result is stamped back onto the snapshot so
-	// createAgentSession's `settings.get("serviceTier")` read picks it up.
-	snapshot.serviceTier = resolveSubagentServiceTier(
-		baseSettings.get("serviceTierSubagent"),
-		baseSettings.get("serviceTier"),
-		inheritedServiceTier,
-	);
+	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
+	// match the parent's live tiers when a live session supplied them, else the
+	// subagent's own configured tier.* settings). The result is stamped back onto
+	// the snapshot so createAgentSession's tier.* reads pick it up.
+	const inheritedTiers =
+		inheritedServiceTier === undefined
+			? buildServiceTierByFamily(
+					baseSettings.get("tier.openai"),
+					baseSettings.get("tier.anthropic"),
+					baseSettings.get("tier.google"),
+				)
+			: (inheritedServiceTier ?? {});
+	const subagentTiers = resolveSubagentServiceTier(baseSettings.get("tier.subagent"), inheritedTiers);
+	snapshot["tier.openai"] = subagentTiers.openai ?? "none";
+	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "none";
+	snapshot["tier.google"] = subagentTiers.google ?? "none";
 	return Settings.isolated({
 		...snapshot,
 		"async.enabled": false,
@@ -786,6 +800,8 @@ interface RunMonitorArgs {
 	sessionFile?: string;
 	/** Soft assistant-request budget; 0 disables the guard. */
 	softRequestBudget: number;
+	/** Whether crossing the soft budget injects a wrap-up steering notice. */
+	softRequestBudgetNotice: boolean;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
 }
@@ -828,7 +844,18 @@ interface SubagentRunMonitor {
 }
 
 function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
-	const { index, id, agent, task, assignment, signal, onProgress, softRequestBudget, maxRuntimeMs } = args;
+	const {
+		index,
+		id,
+		agent,
+		task,
+		assignment,
+		signal,
+		onProgress,
+		softRequestBudget,
+		softRequestBudgetNotice,
+		maxRuntimeMs,
+	} = args;
 	const startTime = Date.now();
 
 	const progress: AgentProgress = {
@@ -855,6 +882,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const finalOutputChunks: string[] = [];
 	const RECENT_OUTPUT_TAIL_BYTES = 8 * 1024;
 	let recentOutputTail = "";
+	let tailLastLineRepresentable = false;
 	let resolved = false;
 	let abortSent = false;
 	let abortReason: AbortReason | undefined;
@@ -1033,17 +1061,35 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	const updateRecentOutputLines = () => {
-		const lines = recentOutputTail.split("\n").filter(line => line.trim());
-		progress.recentOutput = lines.slice(-8).reverse();
+		const lines = recentOutputTail.split("\n");
+		const filtered = lines.filter(line => line.trim());
+		progress.recentOutput = filtered.slice(-8).reverse();
+		// The tail's last raw segment (after its final newline) is "represented"
+		// in recentOutput only when it trims non-empty — an empty/whitespace-only
+		// trailing segment is filtered out, so recentOutput[0] is then the line
+		// before it, not the tail's true last line.
+		tailLastLineRepresentable = lines[lines.length - 1].trim().length > 0;
 	};
 
 	const appendRecentOutputTail = (text: string) => {
 		if (!text) return;
 		recentOutputTail += text;
-		if (recentOutputTail.length > RECENT_OUTPUT_TAIL_BYTES) {
+		const truncated = recentOutputTail.length > RECENT_OUTPUT_TAIL_BYTES;
+		if (truncated) {
 			recentOutputTail = recentOutputTail.slice(-RECENT_OUTPUT_TAIL_BYTES);
 		}
-		updateRecentOutputLines();
+		// Fast path: a token without a newline only extends the current last line.
+		// This runs on every text_delta token (hundreds/thousands per second while
+		// streaming), so skip re-splitting the whole (up to 8KB) tail unless the line
+		// structure actually changed. Requires no truncation AND the tail's last line
+		// already represented (trims non-empty) — otherwise boundaries shift and a
+		// full recompute is required. Appending to a non-empty line keeps it non-empty,
+		// so the flag stays valid across consecutive fast-path tokens.
+		if (truncated || text.includes("\n") || !tailLastLineRepresentable || progress.recentOutput.length === 0) {
+			updateRecentOutputLines();
+		} else {
+			progress.recentOutput = [progress.recentOutput[0] + text, ...progress.recentOutput.slice(1)];
+		}
 	};
 
 	const replaceRecentOutputFromContent = (content: unknown[]) => {
@@ -1063,6 +1109,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 	const resetRecentOutput = () => {
 		recentOutputTail = "";
+		tailLastLineRepresentable = false;
 		progress.recentOutput = [];
 	};
 
@@ -1225,7 +1272,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					if (softRequestBudget > 0 && !abortSent) {
 						if (progress.requests >= softRequestBudget * 1.5) {
 							requestAbort("budget");
-						} else if (!budgetSteerSent && progress.requests >= softRequestBudget) {
+						} else if (softRequestBudgetNotice && !budgetSteerSent && progress.requests >= softRequestBudget) {
 							budgetSteerSent = true;
 							const steerSession = activeSession;
 							if (steerSession) {
@@ -1861,6 +1908,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	);
 	const softRequestBudget =
 		configuredDefaultBudget === 0 ? 0 : (SOFT_REQUEST_BUDGET[agent.name] ?? configuredDefaultBudget);
+	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
@@ -1920,6 +1968,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		detached: options.detached,
 		sessionFile: subtaskSessionFile,
 		softRequestBudget,
+		softRequestBudgetNotice,
 		maxRuntimeMs,
 	});
 	const progress = monitor.progress;
@@ -2046,9 +2095,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					? formatModelSelectorValue(formatModelStringWithRouting(model), resolvedThinkingLevel)
 					: formatModelStringWithRouting(model);
 			}
-			const effectiveThinkingLevel = explicitThinkingLevel
-				? resolvedThinkingLevel
-				: (thinkingLevel ?? resolvedThinkingLevel);
+			const effectiveThinkingLevel = thinkingLevel ?? resolvedThinkingLevel;
 			resolvedAt = performance.now();
 
 			const effectiveCwd = worktree ?? cwd;
@@ -2134,6 +2181,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						planReferencePath: options.planReference?.path ?? "",
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
+						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
 						ircSelfId: ircEnabled ? id : "",
 					});
@@ -2311,7 +2359,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
 			if (options.autoloadSkills?.length) {
 				for (const skill of options.autoloadSkills) {
-					const { message } = await buildSkillPromptMessage(skill, "");
+					const { message } = await buildSkillPromptMessage(skill, "", "autoload");
 					await session.sendCustomMessage(
 						{
 							customType: SKILL_PROMPT_MESSAGE_TYPE,
