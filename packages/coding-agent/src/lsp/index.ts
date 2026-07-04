@@ -529,6 +529,38 @@ async function waitForDiagnostics(
 	return client.diagnostics.get(uri)?.diagnostics ?? [];
 }
 
+/**
+ * Pull diagnostics from a server that advertises `diagnosticProvider`.
+ * Returns the diagnostics from the response, or `[]` if the server returned
+ * no items or the request failed.
+ *
+ * Used as a fallback after `waitForDiagnostics` returns empty, so servers
+ * that only serve diagnostics via the pull model (e.g. tsgo) are still
+ * surfaced. Push-only servers never advertise `diagnosticProvider`, so
+ * this path is never reached for them.
+ */
+async function pullDiagnostics(
+	client: LspClient,
+	uri: string,
+	signal?: AbortSignal,
+): Promise<Diagnostic[]> {
+	const caps = client.serverCapabilities?.diagnosticProvider;
+	if (!caps) return [];
+	try {
+		const result = await sendRequest(
+			client,
+			"textDocument/diagnostic",
+			{ textDocument: { uri } },
+			signal,
+			SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+		) as { kind: "full" | "unchanged"; items?: Diagnostic[]; uris?: string[] } | null;
+		if (!result || result.kind !== "full") return [];
+		return result.items ?? [];
+	} catch {
+		return [];
+	}
+}
+
 /** Project type detection result */
 interface ProjectType {
 	type: "rust" | "typescript" | "go" | "python" | "unknown";
@@ -722,12 +754,16 @@ async function getDiagnosticsForFile(
 			// Content already synced + didSave sent, wait for fresh diagnostics
 			const minVersion = minVersions?.get(serverName);
 			const expectedDocumentVersion = expectedDocumentVersions?.get(serverName);
-			const diagnostics = await waitForDiagnostics(client, uri, {
+			let diagnostics = await waitForDiagnostics(client, uri, {
 				timeoutMs: timeoutMs ?? SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 				signal,
 				minVersion,
 				expectedDocumentVersion,
 			});
+			// Fallback: pull diagnostics from servers that don't push (e.g. tsgo)
+			if (diagnostics.length === 0 && client.serverCapabilities?.diagnosticProvider) {
+				diagnostics = await pullDiagnostics(client, uri, signal);
+			}
 			return { serverName, diagnostics };
 		}),
 	);
@@ -1470,12 +1506,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const minVersion = client.diagnosticsVersion;
 						await refreshFile(client, resolved, signal);
 						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
-						const diagnostics = await waitForDiagnostics(client, uri, {
+						let diagnostics = await waitForDiagnostics(client, uri, {
 							timeoutMs: diagnosticsWaitTimeoutMs,
 							signal,
 							minVersion,
 							expectedDocumentVersion,
 						});
+						// Fallback: pull diagnostics from servers that don't push (e.g. tsgo)
+						if (diagnostics.length === 0 && client.serverCapabilities?.diagnosticProvider) {
+							diagnostics = await pullDiagnostics(client, uri, signal);
+						}
 						allDiagnostics.push(...diagnostics);
 					} catch (err) {
 						if (err instanceof ToolAbortError || signal?.aborted) {

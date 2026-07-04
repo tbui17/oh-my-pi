@@ -142,6 +142,10 @@ const CLIENT_CAPABILITIES = {
 			codeDescriptionSupport: true,
 			dataSupport: true,
 		},
+		diagnostic: {
+			dynamicRegistration: false,
+			relatedDocumentSupport: false,
+		},
 	},
 	window: {
 		workDoneProgress: true,

@@ -1053,6 +1053,145 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("pulls diagnostics from servers that advertise diagnosticProvider", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-pull-diags-");
+		try {
+			const targetFile = path.join(tempDir.path(), "target.ts");
+			await Bun.write(targetFile, "const x: string = 123;\n");
+
+			const server = installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: {
+							capabilities: {
+								textDocumentSync: { openClose: true, change: 2 },
+								diagnosticProvider: {
+									identifier: "typescript",
+									interFileDependencies: true,
+									workspaceDiagnostics: false,
+								},
+							},
+						},
+					});
+				} else if (message.method === "textDocument/diagnostic") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: {
+							kind: "full",
+							items: [
+								{
+									range: { start: { line: 0, character: 6 }, end: { line: 0, character: 7 } },
+									severity: 1,
+									code: 2322,
+									source: "ts",
+									message: "Type 'number' is not assignable to type 'string'.",
+								},
+							],
+						},
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+
+			const config: ServerConfig = {
+				command: "fake-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-lsp": config },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["fake-lsp", config]]);
+			vi.spyOn(lspClient, "waitForProjectLoaded").mockResolvedValue(undefined);
+
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+
+			// Open the file (didOpen) — server will NOT push diagnostics
+			await lspClient.ensureFileOpen(client, targetFile);
+
+			const tool = new LspTool({ cwd: tempDir.path() } as ToolSession);
+			const result = await tool.execute("pull-diag-test", {
+				action: "diagnostics",
+				file: targetFile,
+				timeout: 5,
+			});
+			const output = result.content
+				.filter(block => block.type === "text")
+				.map(block => block.text)
+				.join("\n");
+
+			expect(output).toContain("Type 'number' is not assignable to type 'string'");
+		} finally {
+			vi.restoreAllMocks();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not pull diagnostics when server does not advertise diagnosticProvider", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-no-pull-");
+		try {
+			const targetFile = path.join(tempDir.path(), "target.ts");
+			await Bun.write(targetFile, "const x = 1;\n");
+
+			let pullCalled = false;
+			const server = installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: {
+							capabilities: {
+								textDocumentSync: { openClose: true, change: 2 },
+								// NO diagnosticProvider — push-only
+							},
+						},
+					});
+				} else if (message.method === "textDocument/diagnostic") {
+					pullCalled = true;
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { kind: "full", items: [] } });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-lsp": config },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["fake-lsp", config]]);
+			vi.spyOn(lspClient, "waitForProjectLoaded").mockResolvedValue(undefined);
+
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			await lspClient.ensureFileOpen(client, targetFile);
+
+			const tool = new LspTool({ cwd: tempDir.path() } as ToolSession);
+			await tool.execute("no-pull-test", {
+				action: "diagnostics",
+				file: targetFile,
+				timeout: 5,
+			});
+
+			expect(pullCalled).toBe(false);
+		} finally {
+			vi.restoreAllMocks();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("detects Windows local .exe LSP shims in node_modules/.bin", async () => {
 		if (process.platform !== "win32") {
 			return;

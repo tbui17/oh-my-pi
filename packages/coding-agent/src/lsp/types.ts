@@ -387,6 +387,11 @@ export interface LspServerCapabilities {
 	referencesProvider?: boolean;
 	documentSymbolProvider?: boolean;
 	workspaceSymbolProvider?: boolean;
+	diagnosticProvider?: boolean | {
+		identifier?: string;
+		interFileDependencies?: boolean;
+		workspaceDiagnostics?: boolean;
+	};
 	[key: string]: unknown;
 }
 
