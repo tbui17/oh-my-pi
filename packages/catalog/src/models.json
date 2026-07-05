@@ -55316,6 +55316,7 @@
 			"compat": {
 				"thinkingFormat": "zai",
 				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": true
@@ -55342,52 +55343,10 @@
 			"compat": {
 				"thinkingFormat": "zai",
 				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": false
-			}
-		},
-		"glm-5.2-flex": {
-			"id": "glm-5.2-flex",
-			"name": "glm-5.2-flex",
-			"api": "openai-completions",
-			"provider": "neuralwatt",
-			"baseUrl": "https://api.neuralwatt.com/v1",
-			"reasoning": true,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 1.45,
-				"output": 4.5,
-				"cacheRead": 0.3625,
-				"cacheWrite": 0
-			},
-			"contextWindow": 1048560,
-			"maxTokens": null,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				],
-				"effortMap": {
-					"minimal": "none",
-					"low": "high",
-					"medium": "high",
-					"high": "high",
-					"xhigh": "max"
-				}
-			},
-			"compat": {
-				"thinkingFormat": "zai",
-				"supportsDeveloperRole": false,
-				"maxTokensField": "max_tokens",
-				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": true
 			}
 		},
 		"glm-5.2-short": {
@@ -55428,6 +55387,7 @@
 			"compat": {
 				"thinkingFormat": "zai",
 				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": true
@@ -55454,78 +55414,10 @@
 			"compat": {
 				"thinkingFormat": "zai",
 				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": false
-			}
-		},
-		"glm-5.2-short-fast-flex": {
-			"id": "glm-5.2-short-fast-flex",
-			"name": "glm-5.2-short-fast-flex",
-			"api": "openai-completions",
-			"provider": "neuralwatt",
-			"baseUrl": "https://api.neuralwatt.com/v1",
-			"reasoning": false,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 1.45,
-				"output": 4.5,
-				"cacheRead": 0.3625,
-				"cacheWrite": 0
-			},
-			"contextWindow": 199984,
-			"maxTokens": null,
-			"compat": {
-				"thinkingFormat": "zai",
-				"supportsDeveloperRole": false,
-				"maxTokensField": "max_tokens",
-				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": false
-			}
-		},
-		"glm-5.2-short-flex": {
-			"id": "glm-5.2-short-flex",
-			"name": "glm-5.2-short-flex",
-			"api": "openai-completions",
-			"provider": "neuralwatt",
-			"baseUrl": "https://api.neuralwatt.com/v1",
-			"reasoning": true,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 1.45,
-				"output": 4.5,
-				"cacheRead": 0.3625,
-				"cacheWrite": 0
-			},
-			"contextWindow": 199984,
-			"maxTokens": null,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				],
-				"effortMap": {
-					"minimal": "none",
-					"low": "high",
-					"medium": "high",
-					"high": "high",
-					"xhigh": "max"
-				}
-			},
-			"compat": {
-				"thinkingFormat": "zai",
-				"supportsDeveloperRole": false,
-				"maxTokensField": "max_tokens",
-				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": true
 			}
 		},
 		"kimi-k2.6": {
@@ -55559,6 +55451,7 @@
 			"compat": {
 				"thinkingFormat": "zai",
 				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": true
@@ -55586,45 +55479,10 @@
 			"compat": {
 				"thinkingFormat": "zai",
 				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": false
-			}
-		},
-		"kimi-k2.6-flex": {
-			"id": "kimi-k2.6-flex",
-			"name": "kimi-k2.6-flex",
-			"api": "openai-completions",
-			"provider": "neuralwatt",
-			"baseUrl": "https://api.neuralwatt.com/v1",
-			"reasoning": true,
-			"input": [
-				"text",
-				"image"
-			],
-			"cost": {
-				"input": 0.69,
-				"output": 3.22,
-				"cacheRead": 0.1725,
-				"cacheWrite": 0
-			},
-			"contextWindow": 262128,
-			"maxTokens": null,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				]
-			},
-			"compat": {
-				"thinkingFormat": "zai",
-				"supportsDeveloperRole": false,
-				"maxTokensField": "max_tokens",
-				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": true
 			}
 		},
 		"kimi-k2.7-code": {
@@ -55658,42 +55516,7 @@
 			"compat": {
 				"thinkingFormat": "zai",
 				"supportsDeveloperRole": false,
-				"maxTokensField": "max_tokens",
-				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": true
-			}
-		},
-		"kimi-k2.7-code-flex": {
-			"id": "kimi-k2.7-code-flex",
-			"name": "kimi-k2.7-code-flex",
-			"api": "openai-completions",
-			"provider": "neuralwatt",
-			"baseUrl": "https://api.neuralwatt.com/v1",
-			"reasoning": true,
-			"input": [
-				"text",
-				"image"
-			],
-			"cost": {
-				"input": 0.95,
-				"output": 4,
-				"cacheRead": 0.2375,
-				"cacheWrite": 0
-			},
-			"contextWindow": 262128,
-			"maxTokens": null,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				]
-			},
-			"compat": {
-				"thinkingFormat": "zai",
-				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": true
@@ -55729,6 +55552,7 @@
 			"compat": {
 				"thinkingFormat": "zai",
 				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": true
@@ -55755,6 +55579,7 @@
 			"compat": {
 				"thinkingFormat": "zai",
 				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": false
@@ -55791,6 +55616,7 @@
 			"compat": {
 				"thinkingFormat": "zai",
 				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": true
@@ -55818,6 +55644,7 @@
 			"compat": {
 				"thinkingFormat": "zai",
 				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": false,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": false
