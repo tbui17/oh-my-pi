@@ -576,22 +576,18 @@ async function waitForDiagnostics(
  * surfaced. Push-only servers never advertise `diagnosticProvider`, so
  * this path is never reached for them.
  */
-async function pullDiagnostics(
-	client: LspClient,
-	uri: string,
-	signal?: AbortSignal,
-): Promise<Diagnostic[]> {
+async function pullDiagnostics(client: LspClient, uri: string, signal?: AbortSignal): Promise<Diagnostic[]> {
 	const caps = client.serverCapabilities?.diagnosticProvider;
 	if (!caps) return [];
 	try {
-		const result = await sendRequest(
+		const result = (await sendRequest(
 			client,
 			"textDocument/diagnostic",
 			{ textDocument: { uri } },
 			signal,
 			SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
-		) as { kind: "full" | "unchanged"; items?: Diagnostic[]; uris?: string[] } | null;
-		if (!result || result.kind !== "full") return [];
+		)) as { kind: "full" | "unchanged"; items?: Diagnostic[]; uris?: string[] } | null;
+		if (result?.kind !== "full") return [];
 		return result.items ?? [];
 	} catch {
 		return [];

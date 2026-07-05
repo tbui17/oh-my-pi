@@ -1063,7 +1063,7 @@ describe("lsp regressions", () => {
 			const targetFile = path.join(tempDir.path(), "target.ts");
 			await Bun.write(targetFile, "const x: string = 123;\n");
 
-			const server = installFakeLsp((message, srv) => {
+			installFakeLsp((message, srv) => {
 				if (message.method === "initialize") {
 					srv.send({
 						jsonrpc: "2.0",
@@ -1147,7 +1147,7 @@ describe("lsp regressions", () => {
 			await Bun.write(targetFile, "const x = 1;\n");
 
 			let pullCalled = false;
-			const server = installFakeLsp((message, srv) => {
+			installFakeLsp((message, srv) => {
 				if (message.method === "initialize") {
 					srv.send({
 						jsonrpc: "2.0",
