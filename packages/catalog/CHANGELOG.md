@@ -5,6 +5,28 @@
 ### Fixed
 
 - Fixed Umans GLM 5.2 thinking cycle missing the `xhigh` (max) tier. The Umans `/models/info` endpoint reports reasoning levels `["none", "high", "max"]`, but the `UMANS_REASONING_EFFORT_BY_LEVEL` map had no `max` key, so `"max"` was silently dropped during discovery — leaving only `["high"]` in the cached thinking config and making the cycle show off → auto → high. Added `max: Effort.XHigh` so the top tier is recognized and appears in the cycle.
+## [16.3.7] - 2026-07-05
+
+### Fixed
+
+- Fixed usage cost calculation to correctly account for provider orchestration token sidecars without misclassifying them as standard input, output, or cache tokens.
+
+## [16.3.4] - 2026-07-03
+
+### Added
+
+- Added Baseten as a supported model provider
+- Added support for new models from Baseten, including DeepSeek V4 Pro and Kimi series
+- Added new Devin agent models: Claude 5 Fable variants
+- Added new Github Copilot models: Kimi K2.7 Code and MAI-Code-1-Flash
+- Added Poolside Laguna XS 2.1 models via Kilo and OpenRouter providers
+- Added support for Claude Fable 5 (Free) via Zenmux provider
+
+### Changed
+
+- Updated priority ordering to include Baseten
+- Updated pricing and limits for various existing models in the catalog
+
 ## [16.3.3] - 2026-07-02
 
 ### Fixed
