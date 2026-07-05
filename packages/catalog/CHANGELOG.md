@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Neuralwatt as a bundled OpenAI-compatible provider with API-key login, dynamic model discovery, and metadata-driven pricing/capability/limit mapping.
+
 ## [16.3.7] - 2026-07-05
 
 ### Fixed
