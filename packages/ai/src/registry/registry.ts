@@ -34,6 +34,7 @@ import { minimaxCodeCnProvider } from "./minimax-code-cn";
 import { mistralProvider } from "./mistral";
 import { moonshotProvider } from "./moonshot";
 import { nanogptProvider } from "./nanogpt";
+import { neuralwattProvider } from "./neuralwatt";
 import { nvidiaProvider } from "./nvidia";
 import { ollamaProvider } from "./ollama";
 import { ollamaCloudProvider } from "./ollama-cloud";
@@ -105,6 +106,7 @@ const ALL = [
 	firepassProvider,
 	deepseekProvider,
 	moonshotProvider,
+	neuralwattProvider,
 	cerebrasProvider,
 	basetenProvider,
 	fireworksProvider,

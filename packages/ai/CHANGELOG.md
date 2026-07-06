@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Neuralwatt provider descriptor, OpenAI-compatible model manager options with metadata-driven discovery, and generated `models.json` entries.
+
 ## [16.3.7] - 2026-07-05
 
 ### Fixed

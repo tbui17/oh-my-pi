@@ -5,6 +5,10 @@
 ### Fixed
 
 - Fixed Umans GLM 5.2 thinking cycle missing the `xhigh` (max) tier. The Umans `/models/info` endpoint reports reasoning levels `["none", "high", "max"]`, but the `UMANS_REASONING_EFFORT_BY_LEVEL` map had no `max` key, so `"max"` was silently dropped during discovery — leaving only `["high"]` in the cached thinking config and making the cycle show off → auto → high. Added `max: Effort.XHigh` so the top tier is recognized and appears in the cycle.
+### Added
+
+- Added Neuralwatt as a bundled OpenAI-compatible provider with API-key login, dynamic model discovery, and metadata-driven pricing/capability/limit mapping.
+
 ## [16.3.7] - 2026-07-05
 
 ### Fixed
