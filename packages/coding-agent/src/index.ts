@@ -55,6 +55,7 @@ export * from "./session/session-storage";
 export * from "./session/sql-session-storage";
 export * from "./task/executor";
 export { runEvalAgent, type EvalAgentResult } from "./eval/agent-bridge";
+export { IrcBus, type IrcMessage, type IrcDeliveryReceipt } from "./irc/bus";
 export type * from "./task/types";
 // Tools (detail types and utilities)
 export * from "./tools";
