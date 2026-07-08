@@ -300,4 +300,29 @@ describe("prompt action autocomplete", () => {
 
 		expect(provider.trySyncSlashCompletion("hello")).toBeNull();
 	});
+
+	it("forwards getForceFileSuggestions for bare-word Tab completion mid-prompt", async () => {
+		const basePath = fs.mkdtempSync(path.join(os.tmpdir(), "prompt-force-file-"));
+		try {
+			fs.writeFileSync(path.join(basePath, "foobar.ts"), "export {};\n");
+			const provider = createPromptActionAutocompleteProvider({
+				commands: [],
+				basePath,
+				keybindings: AppKeybindingsManager.inMemory(),
+				copyCurrentLine: () => {},
+				copyPrompt: () => {},
+				undo: () => {},
+				moveCursorToMessageEnd: () => {},
+				moveCursorToMessageStart: () => {},
+				moveCursorToLineStart: () => {},
+				moveCursorToLineEnd: () => {},
+			});
+
+			const result = await provider.getForceFileSuggestions(["look at foobar"], 0, "look at foobar".length);
+			expect(result).not.toBeNull();
+			expect(result?.items.map(i => i.value)).toContain("foobar.ts");
+		} finally {
+			fs.rmSync(basePath, { force: true, recursive: true });
+		}
+	});
 });

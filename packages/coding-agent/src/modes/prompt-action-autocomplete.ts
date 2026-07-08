@@ -282,6 +282,18 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		if (isSettingsInitialized() && !settings.get("emojiAutocomplete")) return null;
 		return tryEmojiInlineReplace(textBeforeCursor);
 	}
+
+	getForceFileSuggestions(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		return this.#baseProvider.getForceFileSuggestions(lines, cursorLine, cursorCol);
+	}
+
+	shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {
+		return this.#baseProvider.shouldTriggerFileCompletion(lines, cursorLine, cursorCol);
+	}
 }
 
 export function createPromptActionAutocompleteProvider(
