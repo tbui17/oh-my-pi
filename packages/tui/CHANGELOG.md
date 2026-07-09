@@ -5,6 +5,19 @@
 ### Fixed
 
 - Fixed mid-prompt `/skill:` autocomplete being silently cancelled on Tab acceptance when prose and the slash token shared the same line. The staleness guard only re-anchored on leading slashes, so a stored prefix like `/skill:agent` (a bare trailing slash token) was rejected when the cursor text was `abc /skill:agent`, preventing Tab from applying the selected completion.
+## [16.3.14] - 2026-07-09
+
+### Fixed
+
+- Fixed race condition where scrollback rows could be incorrectly retracted between render frames
+
+## [16.3.13] - 2026-07-09
+
+### Fixed
+
+- Fixed late terminal appearance subscribers missing the already-detected OSC 11 light/dark result, so theme auto-detection picks up the terminal appearance even when the response arrives before the UI subscribes ([#4731](https://github.com/can1357/oh-my-pi/issues/4731)).
+- Fixed slash command Tab completion reopening the file autocomplete drawer after accepting no-argument commands ([#4808](https://github.com/can1357/oh-my-pi/issues/4808)).
+
 ## [16.3.12] - 2026-07-08
 
 ### Fixed
