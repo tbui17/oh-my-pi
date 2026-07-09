@@ -3,8 +3,7 @@ import { neuralwattModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-mod
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 function makeNeuralwattFetchMock(models: unknown[]): FetchImpl {
-	return async (input: string | URL | Request, init?: RequestInit) => {
-		const headers = new Headers(init?.headers);
+	return async (_input: string | URL | Request, _init?: RequestInit) => {
 		return new Response(JSON.stringify({ data: models }), {
 			status: 200,
 			headers: { "content-type": "application/json" },

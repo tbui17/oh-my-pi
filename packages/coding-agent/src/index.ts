@@ -15,6 +15,7 @@ export type * from "./config/prompt-templates";
 export * from "./config/prompt-templates";
 export type { RetrySettings, SkillsSettings } from "./config/settings";
 export { Settings, settings } from "./config/settings";
+export { type EvalAgentResult, runEvalAgent } from "./eval/agent-bridge";
 // Custom commands
 export type * from "./extensibility/custom-commands/types";
 export type * from "./extensibility/custom-tools";
@@ -28,6 +29,7 @@ export * from "./extensibility/extensions";
 export * from "./extensibility/skills";
 // Slash commands
 export { type FileSlashCommand, loadSlashCommands as discoverSlashCommands } from "./extensibility/slash-commands";
+export { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "./irc/bus";
 export type * from "./lsp";
 // Main entry point
 export * from "./main";
@@ -54,8 +56,6 @@ export * from "./session/session-migrations";
 export * from "./session/session-storage";
 export * from "./session/sql-session-storage";
 export * from "./task/executor";
-export { runEvalAgent, type EvalAgentResult } from "./eval/agent-bridge";
-export { IrcBus, type IrcMessage, type IrcDeliveryReceipt } from "./irc/bus";
 export type * from "./task/types";
 // Tools (detail types and utilities)
 export * from "./tools";
