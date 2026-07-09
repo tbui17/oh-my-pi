@@ -67,6 +67,7 @@ function makeCapturingUIContext(): ExtensionUIContext & {
 		getAllThemes: async () => [],
 		getTheme: async () => undefined,
 		setTheme: async () => ({ success: false }),
+		addAutocompleteProvider: () => {},
 	} as ExtensionUIContext & {
 		editorTexts: string[];
 		notifications: Array<{ message: string; type?: string }>;
