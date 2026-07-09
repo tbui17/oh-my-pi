@@ -1525,10 +1525,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// entries capture it at fetch time and are dropped at injection if a newer
 		// mutation (any tool) bumped it in the meantime.
 		const fileMutationVersions = new Map<string, number>();
+		const activeToolNames = new Set<string>();
+		const setActiveToolNames = (names: Iterable<string>): void => {
+			activeToolNames.clear();
+			for (const name of names) {
+				activeToolNames.add(name);
+			}
+		};
 		const toolSession: ToolSession = {
 			get cwd() {
 				return sessionManager.getCwd();
 			},
+			isToolActive: name => activeToolNames.has(name),
+			setActiveToolNames,
 			hasUI: options.hasUI ?? false,
 			enableLsp,
 			get hasEditTool() {
@@ -2134,6 +2143,24 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
+		if (model) {
+			const selectedModel = model;
+			const refreshedModel = await logger.time("refreshInitialModelMetadata", () =>
+				modelRegistry.refreshSelectedModelMetadata(selectedModel),
+			);
+			if (refreshedModel !== selectedModel) {
+				model = refreshedModel;
+				thinkingLevel = pickInitialThinkingLevel(refreshedModel);
+				autoThinking = thinkingLevel === AUTO_THINKING;
+				effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
+				effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+					autoThinking
+						? resolveProvisionalAutoLevel(refreshedModel)
+						: resolveThinkingLevelForModel(refreshedModel, effectiveThinkingLevel),
+				);
+			}
+		}
+
 		// Discover custom commands (TypeScript slash commands)
 		const customCommandsResult: CustomCommandsLoadResult = options.disableExtensionDiscovery
 			? { commands: [], errors: [] }
@@ -2560,6 +2587,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 		hasRegistered = true;
 
+		setActiveToolNames(initialToolNames);
 		const { systemPrompt } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
@@ -2855,6 +2883,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			reloadSshTool,
 			reloadSkills,
 			requestedToolNames: requestedToolNameSet,
+			setActiveToolNames,
 			getMcpServerInstructions: mcpManager
 				? () => {
 						const raw = mcpManager.getServerInstructions();

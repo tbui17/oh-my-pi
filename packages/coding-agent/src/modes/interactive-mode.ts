@@ -161,8 +161,11 @@ import {
 } from "./loop-limit";
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { countRunningSubagentBadgeAgents, getRunningSubagentBadgeRegistry } from "./running-subagent-badge";
-import type { ObservableSession } from "./session-observer-registry";
-import { SessionObserverRegistry } from "./session-observer-registry";
+import {
+	type ObservableSession,
+	type SessionObserverChangeKind,
+	SessionObserverRegistry,
+} from "./session-observer-registry";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { interruptHint } from "./shared";
@@ -343,9 +346,12 @@ class AnchoredLiveContainer extends Container implements NativeScrollbackLiveReg
  *  before it auto-clears, mirroring the todo HUD's auto-clear timer. */
 const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
+const SUBAGENT_HUD_VISIBLE_LIMIT = 8;
+const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
+
 /**
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
- * one tree row per running agent in the same `Id: description` shape the
+ * a bounded set of running-agent rows in the same `Id: description` shape the
  * inline task rows use (muted task preview when no description was given).
  * Layout mirrors the Todos HUD exactly: unindented header, then
  * `renderTreeList` rows (dim connectors) shifted right by one space.
@@ -361,9 +367,11 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	if (running.length === 0) return [];
 
 	const dot = theme.styledSymbol("status.done", "accent");
+	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
+	const hiddenCount = running.length - visible.length;
 	const rows = renderTreeList(
 		{
-			items: running,
+			items: visible,
 			expanded: true,
 			renderItem: session => {
 				const displayId = formatTaskId(session.id);
@@ -385,6 +393,9 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 		},
 		theme,
 	);
+	if (hiddenCount > 0) {
+		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
+	}
 	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
 }
 
@@ -568,10 +579,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.retryLoader.stop();
 			this.retryLoader = undefined;
 		}
-		this.statusContainer.clear();
-		this.pendingMessagesContainer.clear();
+		this.statusContainer.disposeChildren();
+		this.pendingMessagesContainer.disposeChildren();
 		this.#cancelModelCycleClearTimer();
-		this.modelCycleContainer.clear();
+		this.modelCycleContainer.disposeChildren();
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
@@ -588,6 +599,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#observerRegistry: SessionObserverRegistry;
 	#eventBus?: EventBus;
 	#eventBusUnsubscribers: Array<() => void> = [];
+	#observerUiSyncTimer?: NodeJS.Timeout;
+	#observerUiSyncNeedsTodoReconcile = false;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentRegistry;
 	#mcpStatusOrder: string[] = [];
@@ -917,17 +930,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
 		this.syncRunningSubagentBadge();
-		this.#observerRegistry.onChange(() => {
-			this.syncRunningSubagentBadge();
-			// Auto-checkmark todos whose matching subagent just succeeded, then
-			// re-render so the running override (the static "live" glyph when a
-			// subagent is doing the work for a still-pending todo) updates as
-			// subagents start, finish, or fail.
-			this.#reconcileTodosWithSubagents();
-			this.#syncTodoAutoClearTimer();
-			this.#renderTodoList();
-			this.#renderSubagentList();
-			this.ui.requestRender();
+		this.#observerRegistry.onChange(kind => {
+			this.#scheduleObserverUiSync(kind);
 		});
 
 		// Load initial todos
@@ -1544,19 +1548,18 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
-	syncRunningSubagentBadge(): void {
+	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#agentRegistrySubscriptionTarget = registry;
 			this.#agentRegistryUnsubscribe = registry.onChange(() => {
 				this.syncRunningSubagentBadge();
-				this.ui.requestRender();
 			});
 		}
 		const count = countRunningSubagentBadgeAgents(registry);
 		this.statusLine.setSubagentCount(count);
-		this.ui.requestRender();
+		if (options.requestRender !== false) this.ui.requestRender();
 	}
 
 	rebuildChatFromMessages(): void {
@@ -1775,6 +1778,38 @@ export class InteractiveMode implements InteractiveModeContext {
 			phase.tasks.some(task => task.status === "pending" || task.status === "in_progress"),
 		);
 		return active ?? nonEmpty[nonEmpty.length - 1];
+	}
+
+	#scheduleObserverUiSync(kind: SessionObserverChangeKind): void {
+		if (kind !== "progress") {
+			this.#observerUiSyncNeedsTodoReconcile = true;
+		}
+		if (this.#observerUiSyncTimer) return;
+		this.#observerUiSyncTimer = setTimeout(() => {
+			this.#observerUiSyncTimer = undefined;
+			this.#flushObserverUiSync();
+		}, SUBAGENT_OBSERVER_UI_COALESCE_MS);
+		this.#observerUiSyncTimer.unref?.();
+	}
+
+	#flushObserverUiSync(): void {
+		this.syncRunningSubagentBadge({ requestRender: false });
+		if (this.#observerUiSyncNeedsTodoReconcile) {
+			this.#observerUiSyncNeedsTodoReconcile = false;
+			this.#reconcileTodosWithSubagents();
+		}
+		this.#syncTodoAutoClearTimer();
+		this.#renderTodoList();
+		this.#renderSubagentList();
+		this.ui.requestRender();
+	}
+
+	#cancelObserverUiSyncTimer(): void {
+		if (this.#observerUiSyncTimer) {
+			clearTimeout(this.#observerUiSyncTimer);
+			this.#observerUiSyncTimer = undefined;
+		}
+		this.#observerUiSyncNeedsTodoReconcile = false;
 	}
 
 	#renderTodoList(): void {
@@ -2590,6 +2625,49 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	#resolveLocalRoot(): string {
+		return resolveLocalUrlToPath("local://", {
+			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+			getSessionId: () => this.sessionManager.getSessionId(),
+		});
+	}
+
+	async #copyLocalArtifactsForFreshSession(sourceRoot: string, destinationRoot: string): Promise<void> {
+		if (sourceRoot === destinationRoot) return;
+
+		let sourceRootStat: { isDirectory(): boolean };
+		try {
+			sourceRootStat = await fs.lstat(sourceRoot);
+		} catch (error) {
+			if (isEnoent(error)) return;
+			throw error;
+		}
+
+		if (!sourceRootStat.isDirectory()) return;
+
+		await fs.mkdir(destinationRoot, { recursive: true });
+		await this.#copyLocalArtifactEntries(sourceRoot, destinationRoot);
+	}
+
+	async #copyLocalArtifactEntries(sourceDir: string, destinationDir: string): Promise<void> {
+		const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+		for (const entry of entries) {
+			const sourcePath = path.join(sourceDir, entry.name);
+			const destinationPath = path.join(destinationDir, entry.name);
+
+			if (entry.isDirectory()) {
+				await fs.mkdir(destinationPath, { recursive: true });
+				await this.#copyLocalArtifactEntries(sourcePath, destinationPath);
+				continue;
+			}
+
+			if (entry.isFile()) {
+				await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+				await fs.copyFile(sourcePath, destinationPath);
+			}
+		}
+	}
+
 	async #approvePlan(
 		planContent: string,
 		options: {
@@ -2620,14 +2698,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 
 			if (!options.preserveContext) {
+				const oldLocalRoot = this.#resolveLocalRoot();
 				await this.handleClearCommand();
-				// The new session has a fresh local:// root — persist the approved plan there
-				// so `local://<slug>-plan.md` resolves correctly in the execution session.
+				const newLocalRoot = this.#resolveLocalRoot();
+				await this.#copyLocalArtifactsForFreshSession(oldLocalRoot, newLocalRoot);
 				const newLocalPath = resolveLocalUrlToPath(options.planFilePath, {
 					getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
 					getSessionId: () => this.sessionManager.getSessionId(),
 				});
-				await Bun.write(newLocalPath, planContent);
+				await fs.mkdir(path.dirname(newLocalPath), { recursive: true });
+				await fs.writeFile(newLocalPath, planContent);
 			} else if (options.compactBeforeExecute) {
 				// Distill the plan-mode transcript before the execution turn is queued so
 				// the plan-approved synthetic prompt lands as a fresh cache anchor.
@@ -3329,6 +3409,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#cleanupMicAnimation();
 		this.#cancelTodoAutoClearTimer();
+		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
 		if (this.#sttController) {
 			this.#sttController.dispose();
@@ -3613,7 +3694,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	ensureLoadingAnimation(): void {
 		if (!this.loadingAnimation) {
 			this.#clearWorkingMessageAccentCache();
-			this.statusContainer.clear();
+			this.statusContainer.disposeChildren();
 			const messageColorFn = ((message: string) =>
 				renderWorkingMessage(message, this.#getWorkingMessageAccent())) as LoaderMessageColorFn & {
 				animated?: true;
@@ -3634,7 +3715,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			this.statusContainer.addChild(this.loadingAnimation);
 		} else if (!this.statusContainer.children.includes(this.loadingAnimation)) {
-			this.statusContainer.clear();
+			this.statusContainer.disposeChildren();
 			this.statusContainer.addChild(this.loadingAnimation);
 			this.ui.requestRender();
 		}
@@ -3647,7 +3728,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loadingAnimation = undefined;
 		this.#clearWorkingMessageAccentCache();
 		if (clearStatusContainer) {
-			this.statusContainer.clear();
+			this.statusContainer.disposeChildren();
 		}
 	}
 
@@ -4110,7 +4191,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			this.#btwController.dispose();
 			this.#omfgController.dispose();
-			this.chatContainer.clear();
 			this.renderInitialMessages({ clearTerminalHistory: true });
 			this.updateEditorBorderColor();
 			this.showStatus(

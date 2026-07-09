@@ -10,6 +10,7 @@ import { formatKeyHints, type KeybindingsManager } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { discoverAgents } from "../task/discovery";
 import { applyEmojiCompletion, getEmojiSuggestions, isEmojiPrefix, tryEmojiInlineReplace } from "./emoji-autocomplete";
+import { getGithubRefContext, getGithubRefSuggestions } from "./github-ref-autocomplete";
 import {
 	applyInternalUrlCompletion,
 	getInternalUrlSuggestions,
@@ -131,6 +132,36 @@ function getPromptActionPrefix(textBeforeCursor: string): string | null {
 	return textBeforeCursor.slice(hashIndex);
 }
 
+function applyGithubRefCompletion(
+	lines: string[],
+	cursorLine: number,
+	cursorCol: number,
+	item: AutocompleteItem,
+	prefix: string,
+): { lines: string[]; cursorLine: number; cursorCol: number } | null {
+	if (!getGithubRefContext(prefix)) return null;
+	const scheme: "pr" | "issue" | null = item.value.startsWith("pr://")
+		? "pr"
+		: item.value.startsWith("issue://")
+			? "issue"
+			: null;
+	if (!scheme) return { lines, cursorLine, cursorCol };
+
+	const currentLine = lines[cursorLine] || "";
+	const liveContext = getGithubRefContext(currentLine.slice(0, cursorCol));
+	if (!liveContext || (liveContext.qualifier && liveContext.qualifier !== scheme)) {
+		return { lines, cursorLine, cursorCol };
+	}
+
+	return applyInternalUrlCompletion(
+		lines,
+		cursorLine,
+		cursorCol,
+		{ ...item, value: `${scheme}://${liveContext.number}` },
+		liveContext.prefix,
+	);
+}
+
 export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	#commands: SlashCommand[];
 	#baseProvider: CombinedAutocompleteProvider;
@@ -166,6 +197,8 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			}
 		}
 
+		const githubRefSuggestions = getGithubRefSuggestions(textBeforeCursor);
+		if (githubRefSuggestions) return githubRefSuggestions;
 		const promptActionPrefix = getPromptActionPrefix(textBeforeCursor);
 		const agentPrefix = getAgentPrefix(textBeforeCursor);
 		if (agentPrefix) {
@@ -219,6 +252,8 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		cursorCol: number;
 		onApplied?: () => void;
 	} {
+		const githubRefCompletion = applyGithubRefCompletion(lines, cursorLine, cursorCol, item, prefix);
+		if (githubRefCompletion) return githubRefCompletion;
 		if (prefix.startsWith("#") && isPromptActionItem(item)) {
 			if (item.actionId === "undo") {
 				return {

@@ -35,6 +35,7 @@ import {
 	type AsideMessage,
 	type CompactionSummaryMessage,
 	countTokens,
+	createToolScopedAbortReason,
 	resolveTelemetry,
 	type StreamFn,
 	ThinkingLevel,
@@ -108,6 +109,7 @@ import {
 	clearAnthropicFastModeFallback,
 	deriveClaudeDeviceId,
 	Effort,
+	isUsageLimitOutcome,
 	parseRateLimitReason,
 	realizesPriorityServiceTier,
 	resolveModelServiceTier,
@@ -124,6 +126,7 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
 	escapeXmlText,
+	extractHttpStatusFromError,
 	extractRetryHint,
 	formatDuration,
 	getAgentDbPath,
@@ -179,7 +182,12 @@ import { MODEL_ROLE_IDS, MODEL_ROLES } from "../config/model-roles";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
-import { getDefault, onAppendOnlyModeChanged, validateProviderMaxInFlightRequests } from "../config/settings";
+import {
+	getDefault,
+	onAppendOnlyModeChanged,
+	onModelRolesChanged,
+	validateProviderMaxInFlightRequests,
+} from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { loadCapability } from "../discovery";
 import { expandApplyPatchToEntries, normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
@@ -237,7 +245,7 @@ import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
-import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
+import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
@@ -315,6 +323,7 @@ import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallback";
+import { formatLocalCalendarDate } from "../utils/local-date";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { AuthStorage } from "./auth-storage";
@@ -687,6 +696,8 @@ export interface AgentSessionConfig {
 	toolRegistry?: Map<string, AgentTool>;
 	/** Tool names whose current registry entry is still the built-in implementation. */
 	builtInToolNames?: Iterable<string>;
+	/** Update tool-session predicates that render guidance from the live active tool set. */
+	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Current session pre-LLM message transform pipeline */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/**
@@ -725,6 +736,8 @@ export interface AgentSessionConfig {
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. Returns ordered provider-facing blocks. */
 	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
+	/** Local calendar date provider used by prompt-cache invalidation. Defaults to the host local date. */
+	getLocalCalendarDate?: () => string;
 	/** Rebuild the SSH tool from current capability discovery results. */
 	reloadSshTool?: () => Promise<AgentTool | null>;
 	/** Re-discover skills and return the fresh set so the session can update snapshots. */
@@ -873,6 +886,7 @@ export interface HandoffResult {
 export interface SessionHandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
+	onSwitchCancelled?: () => void;
 }
 
 /** Result from cycleModel() */
@@ -940,6 +954,7 @@ export interface SessionStats {
 	};
 	premiumRequests: number;
 	cost: number;
+	contextUsage?: ContextUsage;
 }
 
 /** Advisor statistics for /advisor status command. */
@@ -1568,6 +1583,7 @@ export class AgentSession {
 	#cancelExitRecorder?: () => void;
 	#exitRecorded = false;
 	#unsubscribeAppendOnly?: () => void;
+	#unsubscribeModelRoles?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -1729,9 +1745,11 @@ export class AgentSession {
 	#rebuildSystemPrompt:
 		| ((toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>)
 		| undefined;
+	#getLocalCalendarDate: () => string;
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
 	#reloadSshTool: (() => Promise<AgentTool | null>) | undefined;
 	#reloadSkills: (() => Promise<{ skills: Skill[]; skillWarnings: SkillWarning[] }>) | undefined;
+	#setActiveToolNames: ((names: Iterable<string>) => void) | undefined;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 	#requestedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
@@ -1839,12 +1857,18 @@ export class AgentSession {
 	 * Sticky across an in-flight prompt run: a successful `yield` makes the run
 	 * terminal for execution purposes, so any trailing empty/aborted assistant
 	 * stop must NOT trigger empty-stop/unexpected-stop/compaction continuations.
-	 * Cleared in `#promptWithMessage` so the next prompt evaluates cleanly.
+	 * Cleared before every new prompt turn so the next turn evaluates cleanly.
 	 */
 	#yieldTerminationPending = false;
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
+
+	#resetPromptMaintenanceState(): void {
+		this.#emptyStopRetryCount = 0;
+		this.#unexpectedStopRetryCount = 0;
+		this.#yieldTerminationPending = false;
+	}
 
 	#acquirePowerAssertion(): void {
 		if (process.platform !== "darwin") return;
@@ -1964,6 +1988,7 @@ export class AgentSession {
 		if (parkedFollowUps.length > 0) {
 			this.agent.replaceQueues([...this.agent.peekSteeringQueue()], []);
 		}
+		this.#resetPromptMaintenanceState();
 		this.#beginInFlight();
 		void this.agent
 			.prompt(records)
@@ -2168,9 +2193,11 @@ export class AgentSession {
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
+		this.#getLocalCalendarDate = config.getLocalCalendarDate ?? formatLocalCalendarDate;
 		this.#getMcpServerInstructions = config.getMcpServerInstructions;
 		this.#reloadSshTool = config.reloadSshTool;
 		this.#reloadSkills = config.reloadSkills;
+		this.#setActiveToolNames = config.setActiveToolNames;
 		this.#disconnectOwnedMcpManager = config.disconnectOwnedMcpManager;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
 		this.#promptModelKey = this.#currentPromptModelKey();
@@ -2267,6 +2294,11 @@ export class AgentSession {
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		this.#unsubscribeAppendOnly = onAppendOnlyModeChanged(_value => this.#syncAppendOnlyContext(this.model));
+		this.#unsubscribeModelRoles = onModelRolesChanged(() => {
+			if (!this.#advisorEnabled || this.#isDisposed) return;
+			if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
+			this.#buildAdvisorRuntime(true);
+		});
 	}
 	// -------------------------------------------------------------------------
 	// Advisor runtime lifecycle
@@ -2399,7 +2431,9 @@ export class AgentSession {
 	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
-		return [config.name, slug, model.provider, model.id, thinkingLevel, tools, instructions].join("\u001f");
+		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions].join(
+			"\u001f",
+		);
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {
@@ -2547,6 +2581,21 @@ export class AgentSession {
 				maintainContext: incomingTokens => this.#maintainAdvisorContext(advisorRef, incomingTokens),
 				obfuscator: this.#obfuscator,
 				beginAdvisorUpdate: () => advisorRef.emissionGuard.beginUpdate(),
+				onTurnError: async error => {
+					// Mirror the auth-gateway's usage-limit remedy: the in-stream a/b/c
+					// auth retry rotates through siblings within one request but never
+					// blocks the LAST failing credential, so without this the advisor
+					// re-picks the same exhausted account every retry. Usage limits
+					// only — other failures keep the plain retry/notify path (never
+					// suspect-mark a credential on a transient advisor error).
+					const message = error instanceof Error ? error.message : String(error);
+					if (!isUsageLimitOutcome(extractHttpStatusFromError(error), message)) return;
+					await this.#modelRegistry.authStorage.markUsageLimitReached(advisorModel.provider, advisorSessionId, {
+						retryAfterMs: extractRetryHint(undefined, message),
+						baseUrl: advisorModel.baseUrl,
+						modelId: advisorModel.id,
+					});
+				},
 				notifyFailure: error => {
 					const message = error instanceof Error ? error.message : String(error);
 					this.emitNotice(
@@ -4674,7 +4723,8 @@ export class AgentSession {
 		// Decide first: a non-interrupting tool-source match attaches to the
 		// specific tool call's result instead of driving a loop-wide follow-up.
 		const shouldInterrupt = this.#shouldInterruptForTtsrMatch(matches, matchContext);
-		const perToolId = shouldInterrupt ? undefined : this.#extractTtsrToolCallId(matchContext);
+		const matchedToolId = this.#extractTtsrToolCallId(matchContext);
+		const perToolId = shouldInterrupt ? undefined : matchedToolId;
 		if (perToolId) {
 			this.#addPerToolTtsrInjections(perToolId, matches);
 			this.#emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
@@ -4690,7 +4740,16 @@ export class AgentSession {
 		// Abort the stream immediately — do not gate on extension callbacks
 		this.#ttsrAbortPending = true;
 		this.#ensureTtsrResumePromise();
-		this.agent.abort(this.#formatTtsrAbortReason(matches));
+		const abortReason = this.#formatTtsrAbortReason(matches);
+		this.agent.abort(
+			matchedToolId
+				? createToolScopedAbortReason(
+						abortReason,
+						{ [matchedToolId]: abortReason },
+						"TTSR interrupt on another tool call",
+					)
+				: abortReason,
+		);
 		// Notify extensions (fire-and-forget, does not block abort)
 		this.#emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
 		// Schedule retry after a short delay
@@ -5763,6 +5822,10 @@ export class AgentSession {
 			this.#unsubscribeAppendOnly();
 			this.#unsubscribeAppendOnly = undefined;
 		}
+		if (this.#unsubscribeModelRoles) {
+			this.#unsubscribeModelRoles();
+			this.#unsubscribeModelRoles = undefined;
+		}
 		this.#eventListeners = [];
 	}
 
@@ -6306,6 +6369,7 @@ export class AgentSession {
 				),
 			);
 		}
+		this.#setActiveToolNames?.(validToolNames);
 		const activeNameSet = new Set(validToolNames);
 		for (const name of Array.from(this.#selectedDiscoveredToolNames)) {
 			if (!activeNameSet.has(name) || isMCPToolName(name) || !this.#toolRegistry.has(name)) {
@@ -6435,6 +6499,7 @@ export class AgentSession {
 	async refreshBaseSystemPrompt(): Promise<void> {
 		if (!this.#rebuildSystemPrompt) return;
 		const activeToolNames = this.getActiveToolNames();
+		this.#setActiveToolNames?.(activeToolNames);
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
 		this.#baseSystemPrompt = built.systemPrompt;
 		this.#baseSystemPromptBeforeMemoryPromotion = undefined;
@@ -6557,7 +6622,7 @@ export class AgentSession {
 			entries.sort();
 			instructionsSegment = entries.join("\u0006");
 		}
-		const date = new Date().toISOString().slice(0, 10);
+		const date = this.#getLocalCalendarDate();
 		return `${nameSegment}\u0003${descriptionSegment}\u0005${registrySegment}\u0007${instructionsSegment}|${date}`;
 	}
 
@@ -7374,11 +7439,15 @@ export class AgentSession {
 				timestamp,
 			});
 		}
-		if (this.#magicKeywordEnabled("workflow") && containsWorkflow(text)) {
+		if (
+			this.#magicKeywordEnabled("workflow") &&
+			containsWorkflow(text) &&
+			this.getActiveToolNames().includes("task")
+		) {
 			keywordNotices.push({
 				role: "custom",
 				customType: "workflow-notice",
-				content: WORKFLOW_NOTICE,
+				content: renderWorkflowNotice({ taskBatch: this.settings.get("task.batch") }),
 				display: false,
 				attribution: "user",
 				timestamp,
@@ -7606,12 +7675,7 @@ export class AgentSession {
 			this.#todoReminderAwaitingProgress = false;
 			this.#mutationsSinceLastTodoTouch = 0;
 			this.#midRunNudgeCount = 0;
-			this.#emptyStopRetryCount = 0;
-			this.#unexpectedStopRetryCount = 0;
-			// A new prompt cycle starts: drop any sticky yield-termination from the
-			// previous run so empty-stop / unexpected-stop / compaction maintenance
-			// can evaluate this turn normally.
-			this.#yieldTerminationPending = false;
+			this.#resetPromptMaintenanceState();
 
 			await this.#maybeRestoreRetryFallbackPrimary();
 
@@ -8824,6 +8888,7 @@ export class AgentSession {
 
 		const targetModel = await this.#modelRegistry.refreshSelectedModelMetadata(model);
 
+		this.#modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(targetModel);
 		this.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
@@ -8861,6 +8926,7 @@ export class AgentSession {
 
 		const targetModel = await this.#modelRegistry.refreshSelectedModelMetadata(model);
 
+		this.#modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(targetModel);
 		this.sessionManager.appendModelChange(
@@ -9020,6 +9086,7 @@ export class AgentSession {
 		const next = scopedModels[nextIndex];
 
 		// Apply model
+		this.#modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(next.model);
 		this.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
@@ -9050,6 +9117,7 @@ export class AgentSession {
 			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
 		}
 
+		this.#modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(nextModel);
 		this.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
@@ -10078,6 +10146,17 @@ export class AgentSession {
 
 			// Start a new session
 			const previousSessionFile = this.sessionFile;
+			if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
+				const result = (await this.#extensionRunner.emit({
+					type: "session_before_switch",
+					reason: "handoff",
+				})) as SessionBeforeSwitchResult | undefined;
+
+				if (result?.cancel) {
+					options?.onSwitchCancelled?.();
+					return undefined;
+				}
+			}
 			await this.sessionManager.flush();
 			this.#cancelOwnAsyncJobs();
 			await this.sessionManager.newSession(previousSessionFile ? { parentSession: previousSessionFile } : undefined);
@@ -10134,6 +10213,13 @@ export class AgentSession {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#resetAllAdvisorRuntimes();
 			this.#syncTodoPhasesFromBranch();
+			if (this.#extensionRunner) {
+				await this.#extensionRunner.emit({
+					type: "session_switch",
+					reason: "handoff",
+					previousSessionFile,
+				});
+			}
 
 			return { document: handoffText, savedPath };
 		} catch (error) {
@@ -12380,13 +12466,17 @@ export class AgentSession {
 			// queue, not the core steering queue (which handoff's agent.reset() would wipe).
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			if (action === "handoff") {
+				let handoffSwitchCancelled = false;
 				const handoffFocus = AUTO_HANDOFF_THRESHOLD_FOCUS;
 				const handoffResult = await this.handoff(handoffFocus, {
 					autoTriggered: true,
 					signal: autoCompactionSignal,
+					onSwitchCancelled: () => {
+						handoffSwitchCancelled = true;
+					},
 				});
 				if (!handoffResult) {
-					const aborted = autoCompactionSignal.aborted;
+					const aborted = autoCompactionSignal.aborted || handoffSwitchCancelled;
 					if (aborted) {
 						await this.#emitSessionEvent({
 							type: "auto_compaction_end",
@@ -13286,6 +13376,7 @@ export class AgentSession {
 	#resolveRetryFallbackRole(currentSelector: string): string | undefined {
 		const parsedCurrent = parseRetryFallbackSelector(currentSelector, this.#modelRegistry);
 		if (!parsedCurrent) return undefined;
+		const chains = this.#getRetryFallbackChains();
 		const currentBaseSelector = formatRetryFallbackBaseSelector(parsedCurrent);
 		const currentPlainSelector = this.model
 			? formatModelSelectorValue(formatModelString(this.model), parsedCurrent.thinkingLevel)
@@ -13295,17 +13386,25 @@ export class AgentSession {
 				? formatRetryFallbackBaseSelector(parseRetryFallbackSelector(currentPlainSelector) ?? parsedCurrent)
 				: undefined;
 
-		for (const role of Object.keys(this.#getRetryFallbackChains())) {
+		for (const role of Object.keys(chains)) {
 			const primarySelector = this.#getRetryFallbackPrimarySelector(role);
 			if (primarySelector?.raw === currentSelector) return role;
 		}
-		for (const role of Object.keys(this.#getRetryFallbackChains())) {
+		for (const role of Object.keys(chains)) {
 			const primarySelector = this.#getRetryFallbackPrimarySelector(role);
 			if (!primarySelector) continue;
 			if (currentPlainSelector && primarySelector.raw === currentPlainSelector) return role;
 			const primaryBaseSelector = formatRetryFallbackBaseSelector(primarySelector);
 			if (primaryBaseSelector === currentBaseSelector) return role;
 			if (currentPlainBaseSelector && primaryBaseSelector === currentPlainBaseSelector) return role;
+		}
+		const defaultChain = chains.default;
+		if (
+			Array.isArray(defaultChain) &&
+			defaultChain.length > 0 &&
+			this.#getRetryFallbackPrimarySelector("default") === undefined
+		) {
+			return "default";
 		}
 		return undefined;
 	}
@@ -13325,9 +13424,27 @@ export class AgentSession {
 	}
 
 	#findRetryFallbackCandidates(role: string, currentSelector: string): RetryFallbackSelector[] {
-		const chain = this.#getRetryFallbackEffectiveChain(role);
-		if (chain.length <= 1) return [];
+		let chain = this.#getRetryFallbackEffectiveChain(role);
 		const parsedCurrent = parseRetryFallbackSelector(currentSelector, this.#modelRegistry);
+		if (chain.length === 0 && role === "default" && parsedCurrent) {
+			const chains = this.#getRetryFallbackChains();
+			const defaultChain = chains.default;
+			if (
+				Array.isArray(defaultChain) &&
+				defaultChain.length > 0 &&
+				this.#getRetryFallbackPrimarySelector("default") === undefined
+			) {
+				const seen = new Set<string>([parsedCurrent.raw]);
+				chain = [parsedCurrent];
+				for (const selector of defaultChain) {
+					const parsed = parseRetryFallbackSelector(selector, this.#modelRegistry);
+					if (!parsed || seen.has(parsed.raw)) continue;
+					seen.add(parsed.raw);
+					chain.push(parsed);
+				}
+			}
+		}
+		if (chain.length <= 1) return [];
 		const currentBaseSelector = parsedCurrent ? formatRetryFallbackBaseSelector(parsedCurrent) : undefined;
 		const currentPlainSelector =
 			this.model && parsedCurrent
@@ -14189,15 +14306,15 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Surfaces (and consumes) pending IRC incoming records before the next model
+	 * Surfaces and consumes pending IRC incoming records before the next model
 	 * step can inject them automatically.
 	 *
-	 * The inbox tool injects the formatted body into the tool result, so the
-	 * model sees it once via the result. Leaving the record in either pending
-	 * IRC queue would deliver it a second time at the next step boundary —
-	 * including on `peek`, which is why peek also drains here.
+	 * Tool results already expose the formatted body to the model. Leaving the
+	 * same record in either pending IRC queue would deliver it a second time at
+	 * the next step boundary — including on `peek`, which is why inbox peeks
+	 * also drain here.
 	 */
-	drainPendingIrcInboxMessages(agentId: string): IrcMessage[] {
+	drainPendingIrcInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[] {
 		const messages: IrcMessage[] = [];
 		const remainingInterrupts: CustomMessage[] = [];
 		const remainingAsides: CustomMessage[] = [];
@@ -14221,6 +14338,14 @@ export class AgentSession {
 				const body = Reflect.get(details, "message");
 				const replyTo = Reflect.get(details, "replyTo");
 				if (typeof id !== "string" || typeof from !== "string" || typeof body !== "string") {
+					queue.remaining.push(record);
+					continue;
+				}
+				if (opts?.from !== undefined && from !== opts.from) {
+					queue.remaining.push(record);
+					continue;
+				}
+				if (opts?.limit !== undefined && messages.length >= opts.limit) {
 					queue.remaining.push(record);
 					continue;
 				}
@@ -15281,6 +15406,7 @@ export class AgentSession {
 			},
 			cost: totalCost,
 			premiumRequests: totalPremiumRequests,
+			contextUsage: this.getContextUsage(),
 		};
 	}
 
@@ -15592,7 +15718,7 @@ export class AgentSession {
 				lastAttemptAtByAccount: coordinator.lastAttemptAtByAccount,
 			});
 			if (!decision.redeem) {
-				logger.debug("codex-auto-reset: skipped", { reason: decision.reason });
+				logger.debug("codex-auto-reset: skipped", { reason: decision.reason, account: accountKey });
 				return false;
 			}
 			if (shouldPromptCodexAutoRedeem(cfg.autoRedeem) && !(await this.#confirmCodexAutoRedeem(decision))) {

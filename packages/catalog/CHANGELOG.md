@@ -8,6 +8,38 @@
 ### Added
 
 - Added Neuralwatt as a bundled OpenAI-compatible provider with API-key login, dynamic model discovery, and metadata-driven pricing/capability/limit mapping.
+## [16.3.12] - 2026-07-08
+
+### Fixed
+
+- Fixed LiteLLM discovery stopping at `/model_group/info` when that endpoint omitted `supports_vision`; it now continues to `/model/info` and preserves `model_info.supports_vision=true` for vision-capable proxy models. ([#4747](https://github.com/can1357/oh-my-pi/issues/4747))
+- Fixed LiteLLM discovery to fall back to bundled catalog metadata when `models.dev` lacks a model reference, preserving reasoning and thinking support for models such as `glm-5.2`. ([#4695](https://github.com/can1357/oh-my-pi/issues/4695))
+- Detected Azure AI Inference / Foundry Anthropic routes as strict-tool-incompatible so resolved Anthropic compat disables strict tools before request construction ([#4679](https://github.com/can1357/oh-my-pi/issues/4679)).
+
+## [16.3.11] - 2026-07-06
+
+### Added
+
+- Added Claude Haiku 4.5 (JP) model support
+- Added tencent/hy3 model support via ZenMux
+
+### Changed
+
+- Updated naming format for various synthetic models to include provider prefix
+- Adjusted context window limit for MiniMax-M3 model
+- Updated pricing for select models
+
+## [16.3.10] - 2026-07-06
+
+### Fixed
+
+- Fixed LiteLLM rich discovery to ignore unusable sentinel placeholders and continue to `/v2/model/info` for real models. ([#4655](https://github.com/can1357/oh-my-pi/issues/4655))
+
+## [16.3.9] - 2026-07-06
+
+### Fixed
+
+- Fixed compatibility with OpenCode Go DeepSeek V4 models by sending max_tokens instead of max_completion_tokens to match the provider's API requirements.
 
 ## [16.3.7] - 2026-07-05
 
