@@ -195,11 +195,11 @@ async function stepBackup(opts: CliOptions): Promise<void> {
 async function stepFetch(opts: CliOptions): Promise<void> {
 	console.log("\n=== Step 2: fetch ===");
 	if (opts.dryRun) {
-		console.log("[DRY-RUN] Would run: git fetch origin --tags");
+		console.log("[DRY-RUN] Would run: git fetch upstream --tags");
 		return;
 	}
-	runGit(["fetch", "origin", "--tags"]);
-	console.log("Fetched origin with tags.");
+	runGit(["fetch", "upstream", "--tags"]);
+	console.log("Fetched upstream with tags.");
 }
 
 async function stepMerge(opts: CliOptions, state: SyncState): Promise<void> {
