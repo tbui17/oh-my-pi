@@ -114,7 +114,7 @@ describe("prompt action autocomplete", () => {
 		expect(suggestions).toBeNull();
 	});
 
-	it("shows discovered agents for dollar-prefixed autocomplete", async () => {
+	it("shows discovered agents for percent-prefixed autocomplete", async () => {
 		const basePath = fs.mkdtempSync(path.join(os.tmpdir(), "agent-autocomplete-"));
 		try {
 			const agentsDir = path.join(basePath, ".omp", "agents");
@@ -136,16 +136,16 @@ describe("prompt action autocomplete", () => {
 				moveCursorToLineEnd: () => {},
 			});
 
-			const suggestions = await provider.getSuggestions(["Use $screen"], 0, 11);
+			const suggestions = await provider.getSuggestions(["Use %screen"], 0, 11);
 			expect(suggestions).not.toBeNull();
-			expect(suggestions?.prefix).toBe("$screen");
+			expect(suggestions?.prefix).toBe("%screen");
 			expect(suggestions?.items.map(item => item.value)).toContain("screening-agent");
 		} finally {
 			fs.rmSync(basePath, { force: true, recursive: true });
 		}
 	});
 
-	it("triggers dollar autocomplete as a mid-sentence token", () => {
+	it("triggers percent autocomplete as a mid-sentence token", () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [],
 			basePath: "/tmp",
@@ -159,13 +159,13 @@ describe("prompt action autocomplete", () => {
 			moveCursorToLineEnd: () => {},
 		});
 
-		expect(provider.shouldTriggerAutocomplete("Ask $", "$")).toBe(true);
-		expect(provider.shouldTriggerAutocomplete("Ask $rev", "v")).toBe(true);
-		expect(provider.shouldTriggerAutocomplete("Ask ($rev", "v")).toBe(true);
-		expect(provider.shouldTriggerAutocomplete("cost$", "$")).toBe(false);
+		expect(provider.shouldTriggerAutocomplete("Ask %", "%")).toBe(true);
+		expect(provider.shouldTriggerAutocomplete("Ask %rev", "v")).toBe(true);
+		expect(provider.shouldTriggerAutocomplete("Ask (%rev", "v")).toBe(true);
+		expect(provider.shouldTriggerAutocomplete("cost%", "%")).toBe(false);
 	});
 
-	it("replaces the dollar prefix with the selected agent name", async () => {
+	it("replaces the percent prefix with the selected agent name", async () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [],
 			basePath: "/tmp",
@@ -180,11 +180,11 @@ describe("prompt action autocomplete", () => {
 		});
 
 		const result = provider.applyCompletion(
-			["Ask $screen for review"],
+			["Ask %screen for review"],
 			0,
 			11,
 			{ value: "screening-agent", label: "screening-agent" },
-			"$screen",
+			"%screen",
 		);
 
 		expect(result.lines).toEqual(["Ask screening-agent for review"]);

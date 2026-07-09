@@ -161,6 +161,28 @@ describe("Editor Enter handler sync slash completion", () => {
 		expect(editor.getText()).toBe("explain this\n/skill:security-scan ");
 	});
 
+	it("accepts mid-prompt skill autocomplete when prose and slash share the same line", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "skill:agent-slack", description: "Slack automation" }], "/tmp"),
+		);
+
+		// Prose and slash token on the SAME line — unlike the multi-line test
+		// above, the stored prefix "/skill:agent" differs from the full
+		// textBeforeCursor "abc /skill:agent", exercising the staleness guard's
+		// trailing-slash re-anchoring path (Tab acceptance, editor.ts ~2874).
+		editor.setText("abc ");
+		editor.handleInput("/");
+		await Promise.resolve();
+
+		expect(editor.isShowingAutocomplete()).toBe(true);
+
+		editor.handleInput("skill:agent");
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("abc /skill:agent-slack ");
+	});
+
 	it("preserves Tab file completion for an absolute path token after prose", async () => {
 		let forceFileCalls = 0;
 		const editor = new Editor(defaultEditorTheme);

@@ -58,5 +58,6 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"| `!!` | Run bash command (excluded from context) |",
 		"| `$` | Run Python in shared kernel |",
 		"| `$$` | Run Python (excluded from context) |",
+		"| `%` | Agent name autocomplete |",
 	].join("\n");
 }

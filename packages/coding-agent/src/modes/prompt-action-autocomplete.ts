@@ -88,16 +88,16 @@ function isAgentPrefixBoundary(char: string | undefined): boolean {
 }
 
 function getAgentPrefix(textBeforeCursor: string): string | null {
-	const dollarIndex = textBeforeCursor.lastIndexOf("$");
-	if (dollarIndex === -1) return null;
-	if (!isAgentPrefixBoundary(textBeforeCursor[dollarIndex - 1])) return null;
+	const percentIndex = textBeforeCursor.lastIndexOf("%");
+	if (percentIndex === -1) return null;
+	if (!isAgentPrefixBoundary(textBeforeCursor[percentIndex - 1])) return null;
 
-	const query = textBeforeCursor.slice(dollarIndex + 1);
+	const query = textBeforeCursor.slice(percentIndex + 1);
 	if (/[\s]/.test(query)) {
 		return null;
 	}
 
-	return textBeforeCursor.slice(dollarIndex);
+	return textBeforeCursor.slice(percentIndex);
 }
 
 async function getAgentSuggestions(cwd: string, prefix: string): Promise<AutocompleteItem[]> {
@@ -245,7 +245,7 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			return applyInternalUrlCompletion(lines, cursorLine, cursorCol, item, prefix);
 		}
 
-		if (prefix.startsWith("$")) {
+		if (prefix.startsWith("%")) {
 			const currentLine = lines[cursorLine] || "";
 			const beforePrefix = currentLine.slice(0, cursorCol - prefix.length);
 			const afterCursor = currentLine.slice(cursorCol);
@@ -273,7 +273,7 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		return this.#baseProvider.trySyncSlashCompletion?.(textBeforeCursor) ?? null;
 	}
 	shouldTriggerAutocomplete(textBeforeCursor: string, char: string): boolean {
-		if (char === "$") return getAgentPrefix(textBeforeCursor) !== null;
+		if (char === "%") return getAgentPrefix(textBeforeCursor) !== null;
 		if (!/[a-zA-Z0-9_-]/.test(char)) return false;
 		return getAgentPrefix(textBeforeCursor) !== null;
 	}

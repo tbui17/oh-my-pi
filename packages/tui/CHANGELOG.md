@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed mid-prompt `/skill:` autocomplete being silently cancelled on Tab acceptance when prose and the slash token shared the same line. The staleness guard only re-anchored on leading slashes, so a stored prefix like `/skill:agent` (a bare trailing slash token) was rejected when the cursor text was `abc /skill:agent`, preventing Tab from applying the selected completion.
+
 ## [16.3.7] - 2026-07-05
 
 ### Fixed

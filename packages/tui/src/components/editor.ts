@@ -2862,9 +2862,12 @@ export class Editor implements Component, Focusable {
 	 * re-anchoring branches in `CombinedAutocompleteProvider.applyCompletion`:
 	 *
 	 * - Exact match → always safe.
-	 * - Path branch is safe when the prefix is still a live suffix of the text; the
-	 *   provider's default slice at `cursorCol - prefix.length` then hits the right span.
-	 * - Slash branch re-anchors when both the prefix and the current text carry a
+	 * - Trailing-slash branch re-anchors mid-prompt skill lookups: the stored prefix
+	 *   is just the slash token (e.g. `/skill:agent`), not the full `textBeforeCursor`
+	 *   (e.g. `abc /skill:agent`), so an exact match fails. We re-anchor on the
+	 *   trailing slash in the current text and accept when the token is clean (no
+	 *   whitespace, no inner slash), matching `applyCompletion`'s mid-prompt guard.
+	 * - Leading-slash branch re-anchors when both the prefix and the current text carry a
 	 *   leading slash command and the current slash token is clean (no whitespace or
 	 *   inner slash), matching `applyCompletion`'s slash-branch guard.
 	 * - `@`-file branch re-anchors via `#extractAtPrefix`; safe when the current text
@@ -2873,6 +2876,18 @@ export class Editor implements Component, Focusable {
 	 */
 	#autocompletePrefixMatchesCursorText(currentTextBeforeCursor: string): boolean {
 		if (currentTextBeforeCursor === this.#autocompletePrefix) return true;
+
+		// Mid-prompt skill lookup: the stored prefix is a bare slash token (e.g.
+		// `/skill:agent`) that differs from the full textBeforeCursor (`abc /skill:agent`).
+		// Re-anchor on the trailing slash so Tab acceptance still fires.
+		if (findTrailingSlashCommandStart(this.#autocompletePrefix) !== null) {
+			const currentTrailingStart = findTrailingSlashCommandStart(currentTextBeforeCursor);
+			if (currentTrailingStart !== null) {
+				const token = currentTextBeforeCursor.slice(currentTrailingStart);
+				if (!token.includes(" ") && !token.slice(1).includes("/")) return true;
+			}
+			return false;
+		}
 
 		if (findLeadingSlashCommandStart(this.#autocompletePrefix) !== null) {
 			const currentLeadingStart = findLeadingSlashCommandStart(currentTextBeforeCursor);
