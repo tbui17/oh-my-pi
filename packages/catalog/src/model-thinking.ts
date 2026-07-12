@@ -331,12 +331,16 @@ function getModelDefinedEfforts<TApi extends Api>(
 ): readonly Effort[] | undefined {
 	if (isGlm52ReasoningEffortModelId(spec.id)) {
 		// Z.ai/Zhipu and OpenRouter both surface GLM-5.2's full effort ladder,
-		// including the top `xhigh` (= "max") tier; Umans and Ollama Cloud
-		// expose only high/max.
+		// including the top `xhigh` (= "max") tier; Umans, Ollama Cloud, and
+		// Neuralwatt expose only high/max.
 		if (isZaiThinkingFormat(compat) || isOpenRouterThinkingFormat(compat)) {
 			return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
 		}
-		if (isUmansGlm52ReasoningEffortModel(spec) || isOllamaCloudGlm52ReasoningEffortModel(spec)) {
+		if (
+			isUmansGlm52ReasoningEffortModel(spec) ||
+			isOllamaCloudGlm52ReasoningEffortModel(spec) ||
+			spec.provider === "neuralwatt"
+		) {
 			return GLM_52_HIGH_MAX_REASONING_EFFORTS;
 		}
 	}
