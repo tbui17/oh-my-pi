@@ -116,6 +116,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 		const settings = Settings.isolated({
 			"compaction.keepRecentTokens": 1,
 			"compaction.model": compactionSelector,
+			"compaction.strategy": "context-full",
 		});
 
 		const agent = new Agent({
