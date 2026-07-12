@@ -360,14 +360,19 @@ function mergeDynamicModel<TApi extends Api>(
 ): Model<TApi> {
 	// When discovery resolves the same model id to a different endpoint (e.g.
 	// a GitHub Copilot business/enterprise host), the bundled reference's
-	// capabilities are pinned to the canonical host and no longer apply —
-	// honour the dynamic value alone. Same-endpoint merges still OR-upgrade so
-	// a discovery that omits the capability flag doesn't drop bundled vision.
+	// capabilities are pinned to another endpoint and no longer apply. Copilot
+	// dynamic discovery also pre-applies the correct image fallback for omitted
+	// `supports.vision`, so its explicit `false` must not be OR-upgraded by the
+	// canonical bundled model. For other canonical hosts, honor the dynamic
+	// value alone; same-endpoint merges still OR-upgrade so a discovery that
+	// omits the capability flag does not drop bundled vision.
 	// For authoritative providers, the dynamic fetch's capability fields win
 	// outright (not OR'd) so stale committed bundles can't pin a model as
 	// reasoning when the live endpoint says it isn't (e.g. Neuralwatt -fast).
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
-	const supportsImage = endpointChanged
+	const dynamicInputAuthoritative =
+		endpointChanged || (existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot");
+	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
