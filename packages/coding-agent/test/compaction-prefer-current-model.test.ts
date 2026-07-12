@@ -165,6 +165,8 @@ describe("compaction prefers the current session model over modelRoles.default",
 		expect(compactSpy).toHaveBeenCalled();
 		const [, firstCandidate] = compactSpy.mock.calls[0]!;
 		expect(`${firstCandidate.provider}/${firstCandidate.id}`).toBe(compactionSelector);
+	});
+
 	it("falls back when the authenticated Bedrock candidate cannot resolve AWS credentials", async () => {
 		const currentModel = getBundledModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
 		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
