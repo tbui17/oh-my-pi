@@ -16,43 +16,52 @@ const IS_COMPILED_BINARY = isCompiledBinary();
 // embedded entries. Bun.plugin `onResolve` also no longer fires for transitive
 // imports inside runtime-loaded extensions.
 //
-// Compiled builds therefore keep live JS-heap references to the host packages
-// and serve requested surfaces through `omp-legacy-pi-bundled:<key>` synthetic
-// modules. `scripts/legacy-pi-virtual-module.ts` derives the static import edges
+// Compiled builds retain lazy loaders for host packages and serve requested
+// surfaces through `omp-legacy-pi-bundled:<key>` synthetic modules.
+// `scripts/legacy-pi-virtual-module.ts` derives literal dynamic-import edges
 // from current package exports inside a Bun build plugin: no generated source
-// or duplicate key list exists on disk. Runtime extension loading stays lazy —
-// the virtual module is evaluated only when an extension requests a host
-// package — but the compiler still sees every possible edge at build time.
+// or duplicate key list exists on disk. Deferring each host module evaluation
+// avoids cycles with an extension-loading command that is itself in the
+// retained package graph.
 const BUNDLED_VIRTUAL_SCHEME = "omp-legacy-pi-bundled:";
 const BUNDLED_VIRTUAL_NAMESPACE = "omp-legacy-pi-bundled";
 const BUNDLED_MODULES_GLOBAL = "__ompLegacyPiBundledModules";
 const TYPEBOX_BUNDLED_MODULE_KEY = "typebox";
 
-type BundledModules = Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+type BundledModule = Readonly<Record<string, unknown>>;
+type BundledModules = Readonly<Record<string, BundledModule>>;
+type BundledModuleLoaders = Readonly<Record<string, () => Promise<BundledModule>>>;
 
-let bundledModulesPromise: Promise<BundledModules> | null = null;
+const loadedBundledModules: Record<string, BundledModule> = {};
+let bundledModuleLoadersPromise: Promise<BundledModuleLoaders> | null = null;
 
 /**
- * Lazy-load the build-supplied host modules and stash them on `globalThis` for
- * the synthetic module source emitted by `synthesizeBundledModuleSource`.
+ * Load the build-supplied module registry without evaluating its host modules.
  *
- * `globalThis` is the bridge: each `omp-legacy-pi-bundled:<key>` source string
- * becomes a separate ES module and cannot close over this file's lexical scope.
- * The dynamic import is intentional conditional build code. Dev/test runs
- * never execute it; binary builds resolve the literal through the in-memory
- * plugin in `scripts/legacy-pi-virtual-module.ts`.
+ * `globalThis` bridges the synthetic ES modules, which cannot close over this
+ * file's lexical scope. Dev/test runs never execute the conditional import;
+ * binary builds resolve it through the in-memory build plugin.
  */
-function ensureBundledModulesLoaded(): Promise<BundledModules> {
+function ensureBundledModuleLoadersLoaded(): Promise<BundledModuleLoaders> {
 	if (!IS_COMPILED_BINARY) {
 		return Promise.reject(new Error("omp:legacy-pi-shim: bundled modules are only available in compiled mode"));
 	}
-	if (!bundledModulesPromise) {
-		bundledModulesPromise = import("omp-legacy-pi-modules").then(module => {
-			Reflect.set(globalThis, BUNDLED_MODULES_GLOBAL, module.BUNDLED_PI_MODULES);
-			return module.BUNDLED_PI_MODULES;
+	if (!bundledModuleLoadersPromise) {
+		bundledModuleLoadersPromise = import("omp-legacy-pi-modules").then(module => {
+			Reflect.set(globalThis, BUNDLED_MODULES_GLOBAL, loadedBundledModules);
+			return module.BUNDLED_PI_MODULE_LOADERS;
 		});
 	}
-	return bundledModulesPromise;
+	return bundledModuleLoadersPromise;
+}
+
+async function loadBundledModule(moduleKey: string): Promise<void> {
+	const loaders = await ensureBundledModuleLoadersLoaded();
+	const loader = loaders[moduleKey];
+	if (!loader) {
+		throw new Error(`omp:legacy-pi-shim: no bundled module registered for ${moduleKey}`);
+	}
+	loadedBundledModules[moduleKey] = await loader();
 }
 
 function bundledModuleVirtualSpecifier(moduleKey: string): string {
@@ -95,8 +104,8 @@ function synthesizeBundledModuleSourceFromModules(moduleKey: string, modules: Bu
  * `omp-legacy-pi-bundled:<key>` import.
  */
 async function synthesizeBundledModuleSource(moduleKey: string): Promise<string> {
-	const modules = await ensureBundledModulesLoaded();
-	return synthesizeBundledModuleSourceFromModules(moduleKey, modules);
+	await loadBundledModule(moduleKey);
+	return synthesizeBundledModuleSourceFromModules(moduleKey, loadedBundledModules);
 }
 
 /** Test seam for the virtual module's named/default export forwarding. */
@@ -369,14 +378,14 @@ export function __buildLegacyPiPackageRootOverrides(
 let legacyPiPackageRootOverrides = __buildLegacyPiPackageRootOverrides(IS_COMPILED_BINARY);
 let legacyPiOverridesReadyPromise: Promise<void> | null = null;
 
-/** Complete compiled-mode overrides once from the lazily evaluated host modules. */
+/** Complete compiled-mode overrides from the lazy host-module registry. */
 function ensureLegacyPiOverridesReady(): Promise<void> {
 	if (!IS_COMPILED_BINARY) {
 		return Promise.resolve();
 	}
 	if (!legacyPiOverridesReadyPromise) {
-		legacyPiOverridesReadyPromise = ensureBundledModulesLoaded().then(modules => {
-			legacyPiPackageRootOverrides = __buildLegacyPiPackageRootOverrides(true, Object.keys(modules));
+		legacyPiOverridesReadyPromise = ensureBundledModuleLoadersLoaded().then(loaders => {
+			legacyPiPackageRootOverrides = __buildLegacyPiPackageRootOverrides(true, Object.keys(loaders));
 		});
 	}
 	return legacyPiOverridesReadyPromise;
@@ -1135,10 +1144,9 @@ async function realpathOrSelfUncached(p: string): Promise<string> {
  * Extension-local bare dependency entries are also included so their relative
  * children receive the reload mtime tag; bare imports inside those dependencies
  * remain native Bun resolutions to avoid taking over full third-party graphs.
- * CommonJS dependency entries stay native too, with one exception: napi-rs
- * style loaders whose bare requires resolve to `.node` addons are hooked so
- * their requires can be pinned to absolute paths (unresolvable by bare
- * specifier inside `bun build --compile` binaries).
+ * CommonJS modules reached through `require()` stay on Bun's native loader.
+ * The only exception is a module whose bare requires resolve to native addons:
+ * those require a synchronous hook that pins the addon to an absolute path.
  */
 async function collectExtensionModules(entryRealPath: string): Promise<Map<string, string>> {
 	const modules = new Map<string, string>();
@@ -1159,32 +1167,40 @@ async function collectExtensionModules(entryRealPath: string): Promise<Map<strin
 		let source: string;
 		try {
 			source = await Bun.file(file).text();
-			if (nativeAddonLoaderModulePaths.has(file)) {
-				// CJS requires cannot await an async onLoad hook. Resolve and
-				// rewrite native-addon paths before installing its sync hook.
-				source = await rewriteExtensionNativeAddonRequires(source, file);
-			}
 		} catch {
 			continue;
 		}
 		modules.set(file, source);
 		const dir = path.dirname(file);
 		const specifiers = new Set<string>();
+		const requiredSpecifiers = new Set<string>();
 		for (const match of source.matchAll(EXTENSION_GRAPH_SPECIFIER_REGEX)) {
 			if (match[2]) specifiers.add(match[2]);
 		}
 		for (const match of source.matchAll(NATIVE_ADDON_REQUIRE_SPECIFIER_REGEX)) {
-			if (match[2]) specifiers.add(match[2]);
+			if (match[2]) {
+				specifiers.add(match[2]);
+				requiredSpecifiers.add(match[2]);
+			}
 		}
 		for (const specifier of specifiers) {
 			try {
 				let resolved: string | null = null;
 				let nextFollowsBareDependencies = followBareDependencies;
+				const isRequired = requiredSpecifiers.has(specifier);
 				if (specifier.startsWith(".")) {
 					const candidate = Bun.resolveSync(specifier, dir);
-					resolved = hasSourceModuleExtension(candidate) ? await realpathOrSelf(candidate) : null;
+					if (
+						hasSourceModuleExtension(candidate) &&
+						(!isRequired || (await moduleRequiresNativeAddon(candidate)))
+					) {
+						resolved = await realpathOrSelf(candidate);
+					}
 				} else if (specifier.startsWith("#")) {
-					resolved = await resolvePackageImportSpecifier(specifier, file);
+					const candidate = await resolvePackageImportSpecifier(specifier, file);
+					if (candidate && (!isRequired || (await moduleRequiresNativeAddon(candidate)))) {
+						resolved = candidate;
+					}
 				} else if (
 					followBareDependencies &&
 					isBareExtensionDependencySpecifier(specifier) &&
@@ -1206,13 +1222,16 @@ async function collectExtensionModules(entryRealPath: string): Promise<Map<strin
 						isHookableEntry && isCommonJsEntry && dependencyEntry
 							? await moduleRequiresNativeAddon(dependencyEntry)
 							: false;
-					if (isHookableEntry && dependencyEntry && (!isCommonJsEntry || hookCommonJsEntry)) {
+					if (isHookableEntry && dependencyEntry && ((!isRequired && !isCommonJsEntry) || hookCommonJsEntry)) {
 						resolved = await realpathOrSelf(dependencyEntry);
-						if (hookCommonJsEntry) {
-							nativeAddonLoaderModulePaths.add(resolved);
-						}
+					}
+					if (resolved && hookCommonJsEntry) {
+						nativeAddonLoaderModulePaths.add(resolved);
 					}
 					nextFollowsBareDependencies = false;
+				}
+				if (resolved && isRequired) {
+					nativeAddonLoaderModulePaths.add(resolved);
 				}
 				if (resolved && !modules.has(resolved)) {
 					const queuedFollowsBareDependencies = queuedFollowBareDependencies.get(resolved) ?? false;
@@ -1223,6 +1242,12 @@ async function collectExtensionModules(entryRealPath: string): Promise<Map<strin
 			} catch {
 				// Unresolvable import (e.g. a type-only path); skip it.
 			}
+		}
+	}
+	for (const modulePath of nativeAddonLoaderModulePaths) {
+		const source = modules.get(modulePath);
+		if (source !== undefined) {
+			modules.set(modulePath, await rewriteExtensionNativeAddonRequires(source, modulePath));
 		}
 	}
 	return modules;

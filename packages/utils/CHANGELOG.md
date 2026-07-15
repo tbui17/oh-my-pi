@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [17.0.0] - 2026-07-15
+
+### Fixed
+
+- Improved SSE streaming performance by batching complete lines into a single UTF-8 decode per chunk, reducing decoder overhead.
+- Fixed an issue in `parseFrontmatter` where a single malformed YAML line would corrupt sibling values by parsing each line independently.
+
+## [16.5.2] - 2026-07-14
+
+### Fixed
+
+- Improved CLI argument and flag validation error output to display a concise error message and command usage instead of a minified code frame.
+- Corrected required variadic positionals to render as `MODELS...` instead of `[MODELS]` in usage help.
+
+## [16.5.1] - 2026-07-14
+
+### Added
+
+- Added terminal stderr guard utilities (suppressTerminalStderr and restoreTerminalStderr) to prevent macOS runtime diagnostics from corrupting TUI viewports while ensuring crash reports remain visible.
+
+### Fixed
+
+- Fixed an issue in Mermaid ASCII routing where unreachable edge attachment points caused unbounded pathfinder searches.
+
 ## [16.4.6] - 2026-07-12
 
 ### Added

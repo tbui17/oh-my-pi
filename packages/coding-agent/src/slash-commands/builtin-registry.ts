@@ -7,6 +7,7 @@ import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
+import { expandRoleAlias, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
@@ -459,6 +460,30 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "prewalk",
+		description: "Switch to a fast/cheap model at the next action (works even without --prewalk)",
+		acpDescription: "Prewalk at the next action",
+		handle: async (_command, runtime) => {
+			const rolePattern = expandRoleAlias("@smol", runtime.settings);
+			const resolved = resolveCliModel({
+				cliModel: rolePattern,
+				modelRegistry: runtime.session.modelRegistry,
+				preferences: getModelMatchPreferences(runtime.settings),
+			});
+			if (resolved.error || !resolved.model) {
+				return usage(resolved.error ?? `Model "${rolePattern}" not found`, runtime);
+			}
+			if (!runtime.session.modelRegistry.hasConfiguredAuth(resolved.model)) {
+				return usage(`No API key for ${resolved.model.provider}/${resolved.model.id}`, runtime);
+			}
+			runtime.session.armPrewalk(resolved.model, resolved.thinkingLevel);
+			await runtime.output(
+				`Prewalk on: switching to ${resolved.model.provider}/${resolved.model.id} at the next edit/write (todo-gated).`,
+			);
+			return commandConsumed();
 		},
 	},
 	{
@@ -1152,7 +1177,11 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				await runtime.output("No tools are available.");
 				return commandConsumed();
 			}
-			await runtime.output(all.map(name => `${active.includes(name) ? "*" : "-"} ${name}`).join("\n"));
+			const lines = all.map(name => `${active.includes(name) ? "*" : "-"} ${name}`);
+			for (const mounted of runtime.session.getXdevToolEntries()) {
+				lines.push(`~ xd://${mounted.name}`);
+			}
+			await runtime.output(lines.join("\n"));
 			return commandConsumed();
 		},
 		handleTui: (_command, runtime) => {
@@ -2226,7 +2255,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			const projectPath = await resolveActiveProjectRegistryPath(runtime.ctx.sessionManager.getCwd());
 			clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 			resetCapabilities();
-			await runtime.ctx.session.refreshSshTool({ activateIfAvailable: true });
 			const newSkills = await runtime.ctx.session.refreshSkills();
 			runtime.ctx.rebuildSkillCommands(newSkills);
 			await runtime.ctx.refreshSlashCommandState();
@@ -2576,7 +2604,6 @@ export async function executeBuiltinSlashCommand(
 				const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
 				clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 				resetCapabilities();
-				await ctx.session.refreshSshTool({ activateIfAvailable: true });
 				const newSkills = await ctx.session.refreshSkills();
 				ctx.rebuildSkillCommands(newSkills);
 				await ctx.refreshSlashCommandState();

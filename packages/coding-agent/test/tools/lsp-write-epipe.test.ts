@@ -79,9 +79,7 @@ describe("writeMessage EPIPE neutralization", () => {
 
 		const tracker = trackUnhandled();
 		try {
-			await expect(
-				writeMessage(sink as unknown as Bun.FileSink, message),
-			).rejects.toThrow("EPIPE");
+			await expect(writeMessage(sink as unknown as Bun.FileSink, message)).rejects.toThrow("EPIPE");
 			await drainMicrotasks();
 			expect(tracker.capture()).toEqual([]);
 		} finally {

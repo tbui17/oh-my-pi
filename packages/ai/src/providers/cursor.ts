@@ -76,6 +76,7 @@ import {
 	RequestContextResultSchema,
 	RequestContextSchema,
 	RequestContextSuccessSchema,
+	RequestedModelSchema,
 	ResumeActionSchema,
 	SelectedContextSchema,
 	SelectedImageSchema,
@@ -350,6 +351,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		let h2Request: http2.ClientHttp2Stream | null = null;
 		let heartbeatTimer: NodeJS.Timeout | null = null;
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
+		const h2Completion = Promise.withResolvers<void>();
+		let resolveH2: (() => void) | undefined = h2Completion.resolve;
 
 		try {
 			const apiKey = options?.apiKey;
@@ -405,6 +408,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			} else {
 				h2Client = http2.connect(baseUrl);
 			}
+			h2Client.on("error", h2Completion.reject);
 
 			h2Request = h2Client.request(requestHeaders);
 
@@ -447,8 +451,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
 				conversationStateCache.set(conversationId, checkpoint);
 			};
-
-			let resolveH2: (() => void) | undefined;
 
 			h2Request.on("response", headers => {
 				debugResponseLogPromise = debugSession?.openResponseLog(
@@ -516,8 +518,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				}
 			});
 
-			h2Request.write(frameConnectMessage(requestBytes));
-
 			const sendHeartbeat = () => {
 				if (!h2Request || h2Request.closed) {
 					return;
@@ -529,57 +529,55 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				h2Request.write(frameConnectMessage(heartbeatBytes));
 			};
 
-			heartbeatTimer = setInterval(sendHeartbeat, 5000);
+			const closeDebugLog = async (): Promise<void> => {
+				const log = await debugResponseLogPromise;
+				await log?.close();
+			};
 
-			await new Promise<void>((resolve, reject) => {
-				resolveH2 = resolve;
-
-				const closeDebugLog = async (): Promise<void> => {
-					const log = await debugResponseLogPromise;
-					await log?.close();
-				};
-
-				h2Request!.on("trailers", trailers => {
-					const status = trailers["grpc-status"];
-					const msg = trailers["grpc-message"];
-					if (status && status !== "0") {
-						void closeDebugLog().finally(() => {
-							reject(
-								new AIError.ProviderResponseError(
-									`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
-									{ kind: "envelope" },
-								),
-							);
-						});
-					}
-				});
-
-				h2Request!.on("end", () => {
-					resolveH2 = undefined;
-					void closeDebugLog()
-						.then(() => {
-							if (endStreamError) {
-								reject(endStreamError);
-								return;
-							}
-							resolve();
-						})
-						.catch(reject);
-				});
-
-				h2Request!.on("error", error => {
-					void closeDebugLog().finally(() => reject(error));
-				});
-
-				if (options?.signal) {
-					options.signal.addEventListener("abort", () => {
-						h2Request?.close();
-						void closeDebugLog().finally(() => {
-							reject(new AIError.AbortError());
-						});
+			h2Request.on("trailers", trailers => {
+				const status = trailers["grpc-status"];
+				const msg = trailers["grpc-message"];
+				if (status && status !== "0") {
+					void closeDebugLog().finally(() => {
+						h2Completion.reject(
+							new AIError.ProviderResponseError(
+								`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
+								{ kind: "envelope" },
+							),
+						);
 					});
 				}
 			});
+
+			h2Request.on("end", () => {
+				resolveH2 = undefined;
+				void closeDebugLog()
+					.then(() => {
+						if (endStreamError) {
+							h2Completion.reject(endStreamError);
+							return;
+						}
+						h2Completion.resolve();
+					})
+					.catch(h2Completion.reject);
+			});
+
+			h2Request.on("error", error => {
+				void closeDebugLog().finally(() => h2Completion.reject(error));
+			});
+
+			if (options?.signal) {
+				options.signal.addEventListener("abort", () => {
+					h2Request?.close();
+					void closeDebugLog().finally(() => {
+						h2Completion.reject(new AIError.AbortError());
+					});
+				});
+			}
+
+			h2Request.write(frameConnectMessage(requestBytes));
+			heartbeatTimer = setInterval(sendHeartbeat, 5000);
+			await h2Completion.promise;
 
 			endCurrentTextBlock(output, stream, state);
 			endCurrentThinkingBlock(output, stream, state);
@@ -2797,16 +2795,24 @@ function buildGrpcRequest(
 		turns,
 	});
 
+	const wireModelId = model.requestModelId ?? model.id;
+	const cursorMaxMode = model.cursorMaxMode === true;
 	const modelDetails = create(ModelDetailsSchema, {
-		modelId: model.id,
+		modelId: wireModelId,
 		displayModelId: model.id,
 		displayName: model.name,
+		...(cursorMaxMode ? { maxMode: true } : undefined),
+	});
+	const requestedModel = create(RequestedModelSchema, {
+		modelId: wireModelId,
+		maxMode: cursorMaxMode,
 	});
 
 	const runRequest = create(AgentRunRequestSchema, {
 		conversationState,
 		action,
 		modelDetails,
+		requestedModel,
 		conversationId: state.conversationId,
 	});
 

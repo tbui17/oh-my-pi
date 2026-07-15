@@ -9,6 +9,9 @@ import {
 	renderKittyPlaceholderLines,
 	setKittyGraphics,
 } from "./kitty-graphics";
+import { isInsideTmux, wrapTmuxPassthrough, wrapTmuxPassthroughIfNeeded } from "./tmux";
+
+export { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
 
 export enum ImageProtocol {
 	Kitty = "\x1b_G",
@@ -142,15 +145,6 @@ export class TerminalInfo {
 	}
 }
 
-/**
- * Whether the agent process is running inside a tmux session. Read fresh on
- * each call so tests can toggle `Bun.env.TMUX` per case without re-importing
- * the module and so a tmux session attached/detached mid-run is observed.
- */
-export function isInsideTmux(env: NodeJS.ProcessEnv = Bun.env): boolean {
-	return Boolean(env.TMUX);
-}
-
 /** Detect terminal multiplexers where scrollback clearing and height-change redraws are hostile. */
 export function isInsideTerminalMultiplexer(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	// TMUX/STY/ZELLIJ/CMUX workspace+surface ids are authoritative session
@@ -170,22 +164,6 @@ export function isInsideTerminalMultiplexer(env: NodeJS.ProcessEnv = Bun.env): b
  */
 export function isInsideZellij(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	return Boolean(env.ZELLIJ);
-}
-
-/**
- * Wrap a control-sequence payload in tmux's DCS passthrough envelope. Each
- * ESC byte inside `payload` is doubled per tmux's escape rules. tmux strips
- * the envelope and forwards the unwrapped payload to the outer terminal only
- * when the user opts in with `set -g allow-passthrough on`; otherwise tmux
- * silently consumes the envelope, which is identical to the pre-wrap baseline
- * (tmux already swallowed the bare OSC).
- *
- * Used by `TerminalInfo.sendNotification` and the OSC 99 capability probe in
- * `terminal.ts` to keep notifications alive for terminals that understand
- * OSC 9 / OSC 99 (kitty, ghostty, wezterm, iterm2) when running under tmux.
- */
-export function wrapTmuxPassthrough(payload: string): string {
-	return `\x1bPtmux;${payload.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;
 }
 
 export function isNotificationSuppressed(): boolean {
@@ -628,7 +606,7 @@ export function setCellDimensions(dims: CellDimensions): void {
 function chunkKittyApc(leadParams: string, base64Data: string): string {
 	const CHUNK_SIZE = 4096;
 	if (base64Data.length <= CHUNK_SIZE) {
-		return `\x1b_G${leadParams};${base64Data}\x1b\\`;
+		return wrapTmuxPassthroughIfNeeded(`\x1b_G${leadParams};${base64Data}\x1b\\`);
 	}
 
 	const chunks: string[] = [];
@@ -640,12 +618,12 @@ function chunkKittyApc(leadParams: string, base64Data: string): string {
 		const isLast = offset + CHUNK_SIZE >= base64Data.length;
 
 		if (isFirst) {
-			chunks.push(`\x1b_G${leadParams},m=1;${chunk}\x1b\\`);
+			chunks.push(wrapTmuxPassthroughIfNeeded(`\x1b_G${leadParams},m=1;${chunk}\x1b\\`));
 			isFirst = false;
 		} else if (isLast) {
-			chunks.push(`\x1b_Gm=0;${chunk}\x1b\\`);
+			chunks.push(wrapTmuxPassthroughIfNeeded(`\x1b_Gq=2,m=0;${chunk}\x1b\\`));
 		} else {
-			chunks.push(`\x1b_Gm=1;${chunk}\x1b\\`);
+			chunks.push(wrapTmuxPassthroughIfNeeded(`\x1b_Gq=2,m=1;${chunk}\x1b\\`));
 		}
 
 		offset += CHUNK_SIZE;
@@ -699,7 +677,7 @@ export function encodeKittyPlacement(options: {
 	if (options.placementId) params.push(`p=${options.placementId}`);
 	if (options.columns) params.push(`c=${options.columns}`);
 	if (options.rows) params.push(`r=${options.rows}`);
-	return `\x1b_G${params.join(",")}\x1b\\`;
+	return wrapTmuxPassthroughIfNeeded(`\x1b_G${params.join(",")}\x1b\\`);
 }
 
 /**
@@ -710,7 +688,7 @@ export function encodeKittyPlacement(options: {
  * this is the only way to actually purge a placed image.
  */
 export function encodeKittyDeleteImage(imageId: number): string {
-	return `\x1b_Ga=d,d=I,i=${imageId},q=2\x1b\\`;
+	return wrapTmuxPassthroughIfNeeded(`\x1b_Ga=d,d=I,i=${imageId},q=2\x1b\\`);
 }
 
 export function encodeITerm2(
@@ -974,11 +952,25 @@ export function renderImage(
 
 	if (TERMINAL.imageProtocol === ImageProtocol.Sixel) {
 		try {
-			const targetWidthPx = Math.max(1, fit.columns * cellDims.widthPx);
-			const targetHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
+			// SIXEL encodes in 6-pixel vertical bands. A height that is not a
+			// multiple of 6 is padded with transparent rows, but the terminal
+			// still allocates cell rows for the padded height. When the padded
+			// height crosses a cell boundary the terminal uses one more row
+			// than fit.rows, so the next line of content overwrites the bottom
+			// of the image — a visible slice stripped from the image. Round the
+			// encode height DOWN to the largest multiple of 6 that fits within
+			// the requested row budget, so the band boundary aligns without
+			// padding and the reserved row count never exceeds fit.rows. Scale
+			// the width by the same ratio so resize_exact preserves the aspect
+			// ratio instead of squashing the image vertically.
+			const rawHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
+			const targetHeightPx = Math.max(6, Math.floor(rawHeightPx / 6) * 6);
+			const heightScale = targetHeightPx / rawHeightPx;
+			const targetWidthPx = Math.max(1, Math.round(fit.columns * cellDims.widthPx * heightScale));
+			const rows = Math.max(1, Math.ceil(targetHeightPx / cellDims.heightPx));
 			const decoded = new Uint8Array(Buffer.from(base64Data, "base64"));
 			const sequence = encodeSixel(decoded, targetWidthPx, targetHeightPx);
-			return { sequence, rows: fit.rows };
+			return { sequence, rows };
 		} catch {
 			return null;
 		}
