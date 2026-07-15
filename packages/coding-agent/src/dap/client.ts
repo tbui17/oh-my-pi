@@ -3,6 +3,7 @@ import { isEnoent, logger, ptree } from "@oh-my-pi/pi-utils";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
 import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError } from "../tools/tool-errors";
+import { isThenable } from "../utils/ipc";
 import type {
 	DapCapabilities,
 	DapClientState,
@@ -418,8 +419,15 @@ export class DapClient {
 	 */
 	async #writeMessage(message: DapRequestMessage | DapResponseMessage): Promise<void> {
 		const content = JSON.stringify(message);
-		this.#writeSink.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n`);
-		this.#writeSink.write(content);
+		// Neutralize async EPIPE rejections from `write()` — when the adapter
+		// exits between ticks, `FileSink.write()` returns a rejected Promise
+		// that, if un-captured, floats as a fatal unhandled rejection. The
+		// `flush()` rejection is handled by the `Promise.race` below. See
+		// `writeFrame` (mcp/transports/stdio.ts) and `safeSend` (utils/ipc.ts).
+		const headerWrite = this.#writeSink.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n`);
+		if (isThenable(headerWrite)) headerWrite.then(undefined, () => {});
+		const bodyWrite = this.#writeSink.write(content);
+		if (isThenable(bodyWrite)) bodyWrite.then(undefined, () => {});
 		const flushResult = this.#writeSink.flush();
 		if (!(flushResult instanceof Promise)) return;
 

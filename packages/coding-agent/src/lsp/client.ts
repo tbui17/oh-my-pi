@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { isEnoent, logger, postmortem, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { isThenable } from "../utils/ipc";
 import { applyWorkspaceEdit } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import type {
@@ -208,7 +209,7 @@ class LspFlushAbortError extends Error {
 	}
 }
 
-async function writeMessage(
+export async function writeMessage(
 	sink: Bun.FileSink,
 	message: LspJsonRpcRequest | LspJsonRpcNotification | LspJsonRpcResponse,
 	signal?: AbortSignal,
@@ -217,7 +218,15 @@ async function writeMessage(
 		throw abortReason(signal);
 	}
 	const content = JSON.stringify(message);
-	sink.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n${content}`);
+	// Neutralize an async EPIPE rejection from `sink.write()` — when the LSP
+	// server exits between read-loop ticks, `FileSink.write()` returns a
+	// rejected Promise that, if un-captured, floats as a fatal unhandled
+	// rejection and tears down the whole session. The `flush()` rejection is
+	// handled by the `.then(…, reject)` chain below; `write()` was not. See
+	// the identical pattern in `writeFrame` (mcp/transports/stdio.ts) and
+	// `safeSend` (utils/ipc.ts).
+	const writeResult = sink.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n${content}`);
+	if (isThenable(writeResult)) writeResult.then(undefined, () => {});
 	const flush = Promise.resolve(sink.flush());
 	if (!signal) {
 		await flush;
